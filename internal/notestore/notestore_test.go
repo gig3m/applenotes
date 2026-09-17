@@ -137,9 +137,10 @@ func TestLinksArePreserved(t *testing.T) {
 }
 
 func TestURLWithSpaceIsWrapped(t *testing.T) {
+	// Once percent-encoded the destination needs no <> wrapper.
 	got := decode(t, blob("docs", run(4, 0, -2, "https://x.test/a b"))).Markdown()
-	if !strings.Contains(got, "(<https://x.test/a%20b>)") {
-		t.Errorf("space in URL not escaped: %q", got)
+	if want := "[docs](https://x.test/a%20b)"; got != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }
 
@@ -157,7 +158,10 @@ func TestBodyTextIsNotReinterpretedAsMarkup(t *testing.T) {
 		{"# not a heading", "\\# not a heading"},
 		{"- not a bullet", "\\- not a bullet"},
 		{"1986. What a year", "1986\\. What a year"},
-		{"    indented", "&#32;indented"},
+		{"    indented", "&#32;   indented"},
+		{"  \tindented", "&#32; \tindented"},
+		{"Smith & Jones", "Smith & Jones"},
+		{"literal &#32; here", "literal \\&#32; here"},
 	} {
 		got := decode(t, blob(tc.text, run(len(tc.text), 0, -2, ""))).Markdown()
 		if got != tc.want {
@@ -200,7 +204,7 @@ func TestLoneNewlineRunDoesNotBleedForward(t *testing.T) {
 func TestOrderedListNumbering(t *testing.T) {
 	t.Run("blank line neither consumes a number nor restarts", func(t *testing.T) {
 		got := decode(t, blob("a\n\nb",
-			run(2, 0, StyleNumList, ""), run(1, 0, StyleNumList, ""), run(1, 0, StyleNumList, ""))).Markdown()
+			run(2, 0, StyleNumList, ""), run(1, 0, StyleBody, ""), run(1, 0, StyleNumList, ""))).Markdown()
 		want := "1. a\n\n2. b"
 		if got != want {
 			t.Errorf("got %q want %q", got, want)
@@ -277,8 +281,8 @@ func TestChecklistRendering(t *testing.T) {
 }
 
 func TestAttachmentIsRendered(t *testing.T) {
-	got := decode(t, blob("\uFFFC", runAttach(1, "ABC-123", "public.jpeg"))).Markdown()
-	want := "[public.jpeg](applenotes:attachment/ABC-123)"
+	got := decode(t, blob("\uFFFC", runAttach(1, "ABC 123", "public.jpeg"))).Markdown()
+	want := "[public.jpeg](applenotes:attachment/ABC%20123)"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
@@ -293,6 +297,30 @@ func TestURLWithNewlineIsEncoded(t *testing.T) {
 	}
 	if !strings.Contains(got, "%0A") {
 		t.Errorf("newline not percent-encoded: %q", got)
+	}
+}
+
+// RFC 3986 percent-encodes UTF-8 octets. Encoding the code point would turn
+// U+2028 into "%2028", which decodes as a space followed by "28".
+func TestURLNonASCIIWhitespaceEncodesUTF8(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"http://x/a\u00a0b", "http://x/a%C2%A0b"},
+		{"http://x/a\u2028b", "http://x/a%E2%80%A8b"},
+	} {
+		got := decode(t, blob("t", run(1, 0, -2, tc.url))).Markdown()
+		if want := "[t](" + tc.want + ")"; got != want {
+			t.Errorf("got %q want %q", got, want)
+		}
+	}
+}
+
+// A corrupt run table must stop the walk rather than skip a run without
+// advancing pos, which would misalign every run after it.
+func TestNegativeLengthEmitsTailUnstyled(t *testing.T) {
+	got := decode(t, blob("abcd",
+		run(1, FontBold, -2, ""), fVarint(1, 0xFFFFFFFF), run(1, FontItalic, -2, ""))).Markdown()
+	if want := "**a**bcd"; got != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }
 

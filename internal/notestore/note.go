@@ -11,12 +11,12 @@ import (
 
 var errWireType = errors.New("unexpected wire type")
 
-// Policy on wire-type mismatches: only AttributeRun.length is fatal, because
+// Policy on malformed fields: only AttributeRun.length is fatal, because
 // reading it as zero silently misaligns every run that follows. Every other
-// scalar costs at most one attribute, so it is skipped rather than failing the
-// whole note -- this is a read-only extraction tool, and a note that renders
-// slightly wrong beats a note that will not open at all if Apple ever re-types
-// a field.
+// scalar, and every nested submessage, costs at most a few attributes, so it is
+// skipped rather than failing the whole note -- this is a read-only extraction
+// tool, and a note that renders slightly wrong beats a note that will not open
+// at all if Apple ever re-types a field.
 
 // Paragraph style types used by Notes. Anything unrecognised falls back to body
 // text rather than being dropped.
@@ -179,19 +179,16 @@ func decodeRun(b []byte) (AttributeRun, error) {
 			r.Length = int(int32(f.val))
 		case 2:
 			if f.typ == wireBytes {
-				ps, err := decodeParagraphStyle(f.data)
-				if err != nil {
-					return err
+				// A malformed style costs this run its formatting, not the note.
+				if ps, err := decodeParagraphStyle(f.data); err == nil {
+					r.ParagraphStyle = ps
 				}
-				r.ParagraphStyle = ps
 			}
 		case 3:
 			if f.typ == wireBytes {
-				name, err := decodeFont(f.data)
-				if err != nil {
-					return err
+				if name, err := decodeFont(f.data); err == nil {
+					r.FontName = name
 				}
-				r.FontName = name
 			}
 		case 5:
 			if f.typ != wireVarint {
@@ -219,11 +216,9 @@ func decodeRun(b []byte) (AttributeRun, error) {
 			}
 		case 12:
 			if f.typ == wireBytes {
-				a, err := decodeAttachment(f.data)
-				if err != nil {
-					return err
+				if a, err := decodeAttachment(f.data); err == nil {
+					r.Attachment = a
 				}
-				r.Attachment = a
 			}
 		}
 		return nil
@@ -252,11 +247,9 @@ func decodeParagraphStyle(b []byte) (*ParagraphStyle, error) {
 			ps.IndentAmount = int(int32(f.val))
 		case 5:
 			if f.typ == wireBytes {
-				c, err := decodeChecklist(f.data)
-				if err != nil {
-					return err
+				if c, err := decodeChecklist(f.data); err == nil {
+					ps.Checklist = c
 				}
-				ps.Checklist = c
 			}
 		case 8:
 			if f.typ != wireVarint {

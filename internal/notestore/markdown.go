@@ -40,9 +40,6 @@ func (n *Note) Markdown() string {
 			return
 		}
 		fence := strings.Repeat("`", maxBacktickRun(monoBuf)+1)
-		if len(fence) < 3 {
-			fence = "```"
-		}
 		out = append(out, fence)
 		out = append(out, monoBuf...)
 		out = append(out, fence)
@@ -405,14 +402,37 @@ func renderAttachment(s span) string {
 func escapeText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
+	for i, r := range s {
 		switch r {
 		case '\\', '`', '*', '_', '[', ']', '<', '>':
 			b.WriteByte('\\')
+		case '&':
+			// Only an & that could begin a character reference needs escaping;
+			// escaping every "Smith & Jones" would be noise.
+			if looksLikeEntity(s[i:]) {
+				b.WriteByte('\\')
+			}
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// looksLikeEntity reports whether s begins with something a Markdown renderer
+// would decode as a character reference.
+func looksLikeEntity(s string) bool {
+	rest := strings.TrimPrefix(s, "&")
+	rest = strings.TrimPrefix(rest, "#")
+	n := 0
+	for n < len(rest) && n < 32 {
+		c := rest[n]
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			n++
+			continue
+		}
+		break
+	}
+	return n > 0 && n < len(rest) && rest[n] == ';'
 }
 
 // escapeLineStart neutralises leading characters that would otherwise turn a
@@ -423,11 +443,26 @@ func escapeLineStart(s string) string {
 	if trimmed == "" {
 		return s
 	}
-	if strings.HasPrefix(s, "    ") || strings.HasPrefix(s, "\t") {
-		// Four leading spaces or a tab would read as an indented code block.
-		// List nesting is applied later as a prefix, so this only sees body
-		// text that genuinely begins with whitespace.
-		return "&#32;" + strings.TrimLeft(s, " \t")
+	// Leading whitespace reaching column 4 reads as an indented code block.
+	// Tabs advance to the next multiple of 4, so this counts columns rather
+	// than testing for a prefix. List nesting is applied later as a prefix, so
+	// only body text that genuinely begins with whitespace reaches here.
+	col := 0
+	for _, r := range s {
+		if r == ' ' {
+			col++
+		} else if r == '\t' {
+			col += 4 - col%4
+		} else {
+			break
+		}
+		if col >= 4 {
+			// Replacing just the first character with its numeric reference
+			// stops the line beginning with whitespace while keeping the rest
+			// of the indentation intact.
+			first, size := utf8.DecodeRuneInString(s)
+			return fmt.Sprintf("&#%d;", first) + s[size:]
+		}
 	}
 	r, size := utf8.DecodeRuneInString(trimmed)
 	switch r {
@@ -460,9 +495,12 @@ func escapeURL(u string) string {
 			b.WriteString("%3E")
 		case unicode.IsSpace(r) || unicode.IsControl(r):
 			// Whitespace is illegal in a destination even inside <>, so it is
-			// always percent-encoded rather than wrapped.
-			fmt.Fprintf(&b, "%%%02X", r)
-			needsWrap = true
+			// percent-encoded. RFC 3986 encodes UTF-8 octets, not code points:
+			// encoding the rune would turn U+2028 into "%2028", which decodes
+			// as a space followed by "28".
+			for _, c := range []byte(string(r)) {
+				fmt.Fprintf(&b, "%%%02X", c)
+			}
 		default:
 			b.WriteRune(r)
 		}
