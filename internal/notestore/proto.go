@@ -1,6 +1,7 @@
 package notestore
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -9,7 +10,10 @@ import (
 // subset of proto2, so decoding them by hand keeps the build free of protoc and
 // any generated code.
 
-var errTruncated = errors.New("notestore: truncated protobuf")
+var (
+	errTruncated = errors.New("notestore: truncated protobuf")
+	errOverflow  = errors.New("notestore: varint overflows 64 bits")
+)
 
 type wireType uint8
 
@@ -33,7 +37,10 @@ type field struct {
 func scan(buf []byte, fn func(f field) error) error {
 	for len(buf) > 0 {
 		key, n := uvarint(buf)
-		if n <= 0 {
+		if n < 0 {
+			return errOverflow
+		}
+		if n == 0 {
 			return errTruncated
 		}
 		buf = buf[n:]
@@ -41,7 +48,10 @@ func scan(buf []byte, fn func(f field) error) error {
 		switch f.typ {
 		case wireVarint:
 			v, n := uvarint(buf)
-			if n <= 0 {
+			if n < 0 {
+				return errOverflow
+			}
+			if n == 0 {
 				return errTruncated
 			}
 			f.val, buf = v, buf[n:]
@@ -49,15 +59,20 @@ func scan(buf []byte, fn func(f field) error) error {
 			if len(buf) < 8 {
 				return errTruncated
 			}
+			f.val = binary.LittleEndian.Uint64(buf)
 			buf = buf[8:]
 		case wireFixed32:
 			if len(buf) < 4 {
 				return errTruncated
 			}
+			f.val = uint64(binary.LittleEndian.Uint32(buf))
 			buf = buf[4:]
 		case wireBytes:
 			l, n := uvarint(buf)
-			if n <= 0 || uint64(len(buf)-n) < l {
+			if n < 0 {
+				return errOverflow
+			}
+			if n == 0 || uint64(len(buf)-n) < l {
 				return errTruncated
 			}
 			f.data, buf = buf[n:n+int(l)], buf[n+int(l):]
@@ -71,13 +86,17 @@ func scan(buf []byte, fn func(f field) error) error {
 	return nil
 }
 
+// uvarint decodes a base-128 varint. It returns n > 0 on success, n == 0 when
+// buf ran out mid-varint, and n < 0 when the value does not fit in 64 bits.
 func uvarint(b []byte) (uint64, int) {
 	var v uint64
 	var s uint
 	for i := 0; i < len(b); i++ {
 		c := b[i]
 		if c < 0x80 {
-			if i > 9 {
+			// At the tenth byte only one bit of headroom remains, so anything
+			// above 1 overflows -- same rule encoding/binary applies.
+			if i > 9 || (i == 9 && c > 1) {
 				return 0, -1
 			}
 			return v | uint64(c)<<s, i + 1
