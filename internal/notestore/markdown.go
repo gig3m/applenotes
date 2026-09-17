@@ -30,41 +30,56 @@ func (n *Note) Markdown() string {
 
 	var out []string
 	counters := map[int]int{}
+	var monoBuf []string
 	inMono := false
 
+	// The fence is sized to the content so a paragraph that itself contains
+	// backtick fences cannot break out of its own block.
 	closeMono := func() {
-		if inMono {
-			out = append(out, "```")
-			inMono = false
+		if !inMono {
+			return
 		}
+		fence := strings.Repeat("`", maxBacktickRun(monoBuf)+1)
+		if len(fence) < 3 {
+			fence = "```"
+		}
+		out = append(out, fence)
+		out = append(out, monoBuf...)
+		out = append(out, fence)
+		monoBuf = nil
+		inMono = false
 	}
 
 	for _, ln := range lines {
 		style := ln.style()
 		indent := ln.indent()
 		body := renderSpans(ln.spans, style == StyleMonospace)
-		blank := strings.TrimSpace(body) == ""
+		blank := strings.Trim(body, " \t\r\n\v\f") == ""
 
 		// Monospaced paragraphs become a fenced block, and their contents are
 		// emitted verbatim -- escaping inside a fence would be visible.
 		if style == StyleMonospace {
-			if !inMono {
-				out = append(out, "```")
-				inMono = true
-			}
-			out = append(out, body)
+			inMono = true
+			monoBuf = append(monoBuf, body)
 			continue
 		}
 		closeMono()
 
 		if blank {
-			delete(counters, indent)
+			// A blank line does not end a numbered list in Notes, so the
+			// counters are left alone.
 			out = append(out, "")
 			continue
 		}
 
 		if style != StyleNumList {
+			// Ending a list at this level ends every level nested under it.
 			delete(counters, indent)
+			for d := range counters {
+				if d > indent {
+					delete(counters, d)
+				}
+			}
 		}
 		prefix := ""
 		switch style {
@@ -213,7 +228,13 @@ func (n *Note) lines(units []uint16) []line {
 	for i := range n.Runs {
 		r := &n.Runs[i]
 		length := r.Length
-		if length <= 0 {
+		if length < 0 {
+			// The run table is corrupt. Stop here rather than skipping the run
+			// without advancing pos, which would misalign everything after it;
+			// the uncovered tail is then emitted unstyled below.
+			break
+		}
+		if length == 0 {
 			continue
 		}
 		// Written as a subtraction so a hostile length cannot overflow the
@@ -248,13 +269,23 @@ func spanFor(r *AttributeRun, text string) span {
 		bold:       r.Bold(),
 		italic:     r.Italic(),
 		strike:     r.Strikethrough,
-		mono:       strings.Contains(name, "mono") || strings.Contains(name, "courier"),
+		mono:       isMonoFont(name),
 		link:       r.Link,
 		attachment: r.Attachment,
 	}
 }
 
 func renderSpans(spans []span, wholeLineMono bool) string {
+	// Inside a fence nothing is markup: no escaping, no emphasis, no links.
+	// Emitting them would put literal ** and [](...) into a code block.
+	if wholeLineMono {
+		var b strings.Builder
+		for _, s := range spans {
+			b.WriteString(s.text)
+		}
+		return b.String()
+	}
+
 	var b strings.Builder
 	for _, s := range spans {
 		t := s.text
@@ -277,11 +308,12 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 			continue
 		}
 
-		if !wholeLineMono {
+		// A code span is literal, so its content must not be backslash-escaped;
+		// the delimiter is instead sized to the content.
+		if s.mono {
+			core = codeSpan(core)
+		} else {
 			core = escapeText(core)
-		}
-		if s.mono && !wholeLineMono {
-			core = "`" + core + "`"
 		}
 		if s.strike {
 			core = "~~" + core + "~~"
@@ -298,11 +330,54 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		}
 		b.WriteString(lead + core + trail)
 	}
-	out := b.String()
-	if !wholeLineMono {
-		out = escapeLineStart(out)
+	return escapeLineStart(b.String())
+}
+
+// codeSpan wraps text in backticks long enough to survive any backticks inside
+// it, padding with spaces where CommonMark requires it.
+func codeSpan(text string) string {
+	fence := strings.Repeat("`", longestBacktickRun(text)+1)
+	pad := ""
+	if strings.HasPrefix(text, "`") || strings.HasSuffix(text, "`") {
+		pad = " "
 	}
-	return out
+	return fence + pad + text + pad + fence
+}
+
+func longestBacktickRun(s string) int {
+	best, cur := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			cur++
+			if cur > best {
+				best = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	return best
+}
+
+func maxBacktickRun(lines []string) int {
+	best := 2
+	for _, l := range lines {
+		if n := longestBacktickRun(l); n > best {
+			best = n
+		}
+	}
+	return best
+}
+
+// isMonoFont reports whether a font name denotes a monospaced face. Menlo is
+// what macOS actually ships for monospaced text.
+func isMonoFont(name string) bool {
+	for _, f := range []string{"mono", "courier", "menlo", "consolas"} {
+		if strings.Contains(name, f) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderAttachment(s span) string {
@@ -322,7 +397,7 @@ func renderAttachment(s span) string {
 	if s.attachment.Identifier == "" {
 		return "[" + escapeText(label) + "]"
 	}
-	return "[" + escapeText(label) + "](applenotes:attachment/" + s.attachment.Identifier + ")"
+	return "[" + escapeText(label) + "](" + escapeURL("applenotes:attachment/"+s.attachment.Identifier) + ")"
 }
 
 // escapeText neutralises inline Markdown metacharacters so note text is never
@@ -348,6 +423,12 @@ func escapeLineStart(s string) string {
 	if trimmed == "" {
 		return s
 	}
+	if strings.HasPrefix(s, "    ") || strings.HasPrefix(s, "\t") {
+		// Four leading spaces or a tab would read as an indented code block.
+		// List nesting is applied later as a prefix, so this only sees body
+		// text that genuinely begins with whitespace.
+		return "&#32;" + strings.TrimLeft(s, " \t")
+	}
 	r, size := utf8.DecodeRuneInString(trimmed)
 	switch r {
 	case '#', '>', '-', '+', '=':
@@ -369,9 +450,25 @@ func escapeLineStart(s string) string {
 // escapeURL renders a link destination safely. Whitespace is not permitted bare
 // in a Markdown destination, so such URLs are wrapped in angle brackets.
 func escapeURL(u string) string {
-	if strings.ContainsFunc(u, unicode.IsSpace) || strings.ContainsAny(u, "()") {
-		r := strings.NewReplacer("<", "%3C", ">", "%3E", " ", "%20")
-		return "<" + r.Replace(u) + ">"
+	needsWrap := strings.ContainsAny(u, "()")
+	var b strings.Builder
+	for _, r := range u {
+		switch {
+		case r == '<':
+			b.WriteString("%3C")
+		case r == '>':
+			b.WriteString("%3E")
+		case unicode.IsSpace(r) || unicode.IsControl(r):
+			// Whitespace is illegal in a destination even inside <>, so it is
+			// always percent-encoded rather than wrapped.
+			fmt.Fprintf(&b, "%%%02X", r)
+			needsWrap = true
+		default:
+			b.WriteRune(r)
+		}
 	}
-	return u
+	if needsWrap {
+		return "<" + b.String() + ">"
+	}
+	return b.String()
 }

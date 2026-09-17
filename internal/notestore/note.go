@@ -11,15 +11,12 @@ import (
 
 var errWireType = errors.New("unexpected wire type")
 
-// wantVarint rejects a field that the schema declares as a varint but which
-// arrived with another wire type. Reading it as zero instead would silently
-// misalign every subsequent run.
-func wantVarint(f field, name string) error {
-	if f.typ != wireVarint {
-		return fmt.Errorf("notestore: %s: %w", name, errWireType)
-	}
-	return nil
-}
+// Policy on wire-type mismatches: only AttributeRun.length is fatal, because
+// reading it as zero silently misaligns every run that follows. Every other
+// scalar costs at most one attribute, so it is skipped rather than failing the
+// whole note -- this is a read-only extraction tool, and a note that renders
+// slightly wrong beats a note that will not open at all if Apple ever re-types
+// a field.
 
 // Paragraph style types used by Notes. Anything unrecognised falls back to body
 // text rather than being dropped.
@@ -68,7 +65,6 @@ type AttributeRun struct {
 	Length         int
 	ParagraphStyle *ParagraphStyle
 	FontName       string
-	FontHints      int
 	FontWeight     int // a FontDefault/FontBold/... style enum, not a weight
 	Underlined     bool
 	Strikethrough  bool
@@ -174,8 +170,8 @@ func decodeRun(b []byte) (AttributeRun, error) {
 	err := scan(b, func(f field) error {
 		switch f.num {
 		case 1:
-			if err := wantVarint(f, "AttributeRun.length"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return fmt.Errorf("notestore: AttributeRun.length: %w", errWireType)
 			}
 			// length is int32 in the schema; narrowing keeps a hostile varint
 			// from producing a huge positive Length that overflows later
@@ -191,26 +187,30 @@ func decodeRun(b []byte) (AttributeRun, error) {
 			}
 		case 3:
 			if f.typ == wireBytes {
-				r.FontName, r.FontHints = decodeFont(f.data)
+				name, err := decodeFont(f.data)
+				if err != nil {
+					return err
+				}
+				r.FontName = name
 			}
 		case 5:
-			if err := wantVarint(f, "AttributeRun.font_weight"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			r.FontWeight = int(int32(f.val))
 		case 6:
-			if err := wantVarint(f, "AttributeRun.underlined"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			r.Underlined = f.val != 0
 		case 7:
-			if err := wantVarint(f, "AttributeRun.strikethrough"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			r.Strikethrough = f.val != 0
 		case 8:
-			if err := wantVarint(f, "AttributeRun.superscript"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			r.Superscript = int(int32(f.val))
 		case 9:
@@ -236,18 +236,18 @@ func decodeParagraphStyle(b []byte) (*ParagraphStyle, error) {
 	err := scan(b, func(f field) error {
 		switch f.num {
 		case 1:
-			if err := wantVarint(f, "ParagraphStyle.style_type"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			ps.StyleType = int(int32(f.val))
 		case 2:
-			if err := wantVarint(f, "ParagraphStyle.alignment"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			ps.Alignment = int(int32(f.val))
 		case 4:
-			if err := wantVarint(f, "ParagraphStyle.indent_amount"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			ps.IndentAmount = int(int32(f.val))
 		case 5:
@@ -259,8 +259,8 @@ func decodeParagraphStyle(b []byte) (*ParagraphStyle, error) {
 				ps.Checklist = c
 			}
 		case 8:
-			if err := wantVarint(f, "ParagraphStyle.block_quote"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			ps.BlockQuote = int(int32(f.val))
 		}
@@ -275,12 +275,12 @@ func decodeChecklist(b []byte) (*Checklist, error) {
 		switch f.num {
 		case 1:
 			if f.typ != wireBytes {
-				return fmt.Errorf("notestore: Checklist.uuid: %w", errWireType)
+				return nil
 			}
 			c.UUID = append([]byte(nil), f.data...)
 		case 2:
-			if err := wantVarint(f, "Checklist.done"); err != nil {
-				return err
+			if f.typ != wireVarint {
+				return nil
 			}
 			c.Done = f.val != 0
 		}
@@ -289,23 +289,17 @@ func decodeChecklist(b []byte) (*Checklist, error) {
 	return c, err
 }
 
-// decodeFont returns the font name and its hint bits. Notes encodes italic and
-// bold in the hints rather than in dedicated fields.
-func decodeFont(b []byte) (string, int) {
+// decodeFont returns the font name. font_hints is deliberately not read: Notes
+// does not populate it, and bold/italic live in AttributeRun.font_weight.
+func decodeFont(b []byte) (string, error) {
 	var name string
-	var hints int
-	_ = scan(b, func(f field) error {
-		switch f.num {
-		case 1:
-			if f.typ == wireBytes {
-				name = string(f.data)
-			}
-		case 3:
-			hints = int(f.val)
+	err := scan(b, func(f field) error {
+		if f.num == 1 && f.typ == wireBytes {
+			name = string(f.data)
 		}
 		return nil
 	})
-	return name, hints
+	return name, err
 }
 
 func decodeAttachment(b []byte) (*AttachmentInfo, error) {

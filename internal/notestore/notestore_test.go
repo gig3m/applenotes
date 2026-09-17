@@ -48,6 +48,25 @@ func runIndent(length, style, indent int) []byte {
 	return append(fVarint(1, uint64(length)), fBytes(2, ps)...)
 }
 
+func runFont(length int, name string) []byte {
+	return append(fVarint(1, uint64(length)), fBytes(3, fBytes(1, []byte(name)))...)
+}
+
+func runCheck(length int, done bool) []byte {
+	d := uint64(0)
+	if done {
+		d = 1
+	}
+	chk := append(fBytes(1, []byte("uuid")), fVarint(2, d)...)
+	ps := append(fVarint(1, uint64(int32(StyleChecklist))), fBytes(5, chk)...)
+	return append(fVarint(1, uint64(length)), fBytes(2, ps)...)
+}
+
+func runAttach(length int, id, uti string) []byte {
+	ai := append(fBytes(1, []byte(id)), fBytes(2, []byte(uti))...)
+	return append(fVarint(1, uint64(length)), fBytes(12, ai)...)
+}
+
 func blob(text string, runs ...[]byte) []byte {
 	note := fBytes(2, []byte(text))
 	for _, r := range runs {
@@ -76,12 +95,19 @@ func decode(t *testing.T, b []byte) *Note {
 
 // A hostile length must not overflow the offset arithmetic and panic.
 func TestHostileRunLengthDoesNotPanic(t *testing.T) {
-	b := blob("ab", run(1, 0, -2, ""), fVarint(1, 0x7FFFFFFFFFFFFFFF))
-	n, err := Decode(b)
-	if err != nil {
-		return // rejecting it outright is also fine
+	for name, length := range map[string]uint64{
+		"maxint64":       0x7FFFFFFFFFFFFFFF, // narrows to int32 -1
+		"maxint32":       0x7FFFFFFF,         // stays large and positive
+		"negative int32": 0x80000000,
+	} {
+		t.Run(name, func(t *testing.T) {
+			n, err := Decode(blob("ab", run(1, 0, -2, ""), fVarint(1, length)))
+			if err != nil {
+				return // rejecting it outright is also fine
+			}
+			_ = n.Markdown() // must not panic
+		})
 	}
-	_ = n.Markdown() // must not panic
 }
 
 func TestFontWeightIsAStyleEnum(t *testing.T) {
@@ -127,10 +153,15 @@ func TestExoticWhitespaceSurvives(t *testing.T) {
 }
 
 func TestBodyTextIsNotReinterpretedAsMarkup(t *testing.T) {
-	for _, text := range []string{"# not a heading", "- not a bullet", "1986. What a year"} {
-		got := decode(t, blob(text, run(len(text), 0, -2, ""))).Markdown()
-		if got == text {
-			t.Errorf("unescaped structure: %q", got)
+	for _, tc := range []struct{ text, want string }{
+		{"# not a heading", "\\# not a heading"},
+		{"- not a bullet", "\\- not a bullet"},
+		{"1986. What a year", "1986\\. What a year"},
+		{"    indented", "&#32;indented"},
+	} {
+		got := decode(t, blob(tc.text, run(len(tc.text), 0, -2, ""))).Markdown()
+		if got != tc.want {
+			t.Errorf("%q: got %q want %q", tc.text, got, tc.want)
 		}
 	}
 }
@@ -167,11 +198,21 @@ func TestLoneNewlineRunDoesNotBleedForward(t *testing.T) {
 }
 
 func TestOrderedListNumbering(t *testing.T) {
-	t.Run("blank item consumes no number", func(t *testing.T) {
+	t.Run("blank line neither consumes a number nor restarts", func(t *testing.T) {
 		got := decode(t, blob("a\n\nb",
 			run(2, 0, StyleNumList, ""), run(1, 0, StyleNumList, ""), run(1, 0, StyleNumList, ""))).Markdown()
-		if strings.Contains(got, "3.") {
-			t.Errorf("blank item consumed a number: %q", got)
+		want := "1. a\n\n2. b"
+		if got != want {
+			t.Errorf("got %q want %q", got, want)
+		}
+	})
+	t.Run("ending a list ends its nested levels", func(t *testing.T) {
+		got := decode(t, blob("a\nb\nc\nd",
+			runIndent(2, StyleNumList, 0), runIndent(2, StyleNumList, 1),
+			runIndent(2, StyleBody, 0), runIndent(1, StyleNumList, 1))).Markdown()
+		want := "1. a\n    1. b\nc\n    1. d"
+		if got != want {
+			t.Errorf("got %q want %q", got, want)
 		}
 	})
 	t.Run("nested list numbers independently", func(t *testing.T) {
@@ -186,8 +227,82 @@ func TestOrderedListNumbering(t *testing.T) {
 
 func TestMonospaceIsFenced(t *testing.T) {
 	got := decode(t, blob("foo *bar*", run(9, 0, StyleMonospace, ""))).Markdown()
-	if !strings.HasPrefix(got, "```") || !strings.Contains(got, "foo *bar*") {
-		t.Errorf("monospace not fenced verbatim: %q", got)
+	want := "```\nfoo *bar*\n```"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// Nothing inside a fence is markup. A link or bold run in a monospaced
+// paragraph must not inject [](...) or ** into the code block.
+func TestFenceContentIsVerbatim(t *testing.T) {
+	got := decode(t, blob("http://x", run(8, FontBold, StyleMonospace, "http://x"))).Markdown()
+	want := "```\nhttp://x\n```"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// A monospaced paragraph containing a fence must not break out of its own.
+func TestFenceIsSizedToContent(t *testing.T) {
+	got := decode(t, blob("```go", run(5, 0, StyleMonospace, ""))).Markdown()
+	want := "````\n```go\n````"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// An inline code span is literal: its content must not be backslash-escaped,
+// and the delimiter grows to clear any backticks inside.
+func TestInlineCodeSpanIsNotEscaped(t *testing.T) {
+	// Padding is only required when the content itself starts or ends with a
+	// backtick; "a`b" does not, so no spaces are added.
+	got := decode(t, blob("a`b", runFont(3, "Menlo-Regular"))).Markdown()
+	if want := "``a`b``"; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+	padded := decode(t, blob("`x", runFont(2, "Menlo-Regular"))).Markdown()
+	if want := "`` `x ``"; padded != want {
+		t.Errorf("got %q want %q", padded, want)
+	}
+}
+
+func TestChecklistRendering(t *testing.T) {
+	got := decode(t, blob("todo\ndone",
+		runCheck(5, false), runCheck(4, true))).Markdown()
+	want := "- [ ] todo\n- [x] done"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestAttachmentIsRendered(t *testing.T) {
+	got := decode(t, blob("\uFFFC", runAttach(1, "ABC-123", "public.jpeg"))).Markdown()
+	want := "[public.jpeg](applenotes:attachment/ABC-123)"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// Whitespace is illegal in a Markdown destination even inside <>, so it is
+// percent-encoded rather than passed through.
+func TestURLWithNewlineIsEncoded(t *testing.T) {
+	got := decode(t, blob("t", run(1, 0, -2, "http://x/a\nb"))).Markdown()
+	if strings.Contains(got, "\n") {
+		t.Errorf("raw newline survived in destination: %q", got)
+	}
+	if !strings.Contains(got, "%0A") {
+		t.Errorf("newline not percent-encoded: %q", got)
+	}
+}
+
+func TestOversizedBlobRejected(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(make([]byte, MaxDecompressed+1))
+	zw.Close()
+	if _, err := Decode(buf.Bytes()); err != ErrTooLarge {
+		t.Errorf("got %v want ErrTooLarge", err)
 	}
 }
 
