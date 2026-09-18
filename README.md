@@ -83,7 +83,8 @@ The read path is complete and validated against a real library.
 - [x] SQLite index reader (titles, folders, UUIDs, timestamps)
 - [x] `notes` CLI: list, folders, show, decode
 - [x] write path via Apple Events (`new`, `append`, `replace`, `rm`)
-- [ ] `notesd` HTTP+JSON daemon and LaunchAgent
+- [x] `notesd` HTTP+JSON daemon
+- [ ] LaunchAgent and installer
 - [ ] installer / TCC grants
 - [ ] Linux TUI and Omarchy bar client
 
@@ -182,6 +183,35 @@ nothing is created. Against a *copy*, SQLite will create empty sidecars next to
 it — so copy `NoteStore.sqlite-wal` alongside the database, or you will also be
 reading a stale snapshot missing everything Notes has not yet checkpointed.
 (`-shm` need not be copied; SQLite rebuilds it from the `-wal`.)
+
+## notesd
+
+```
+notesd [-addr 127.0.0.1:8437] [-token ~/.config/applenotes/token] [-db PATH]
+```
+
+Generates a bearer token on first run, 0600, and refuses to start if the file
+is group- or world-readable. Every route requires it, including `/v1/healthz`:
+on a tailnet there is no other perimeter.
+
+| | |
+|---|---|
+| `GET /v1/folders` | folders, with the trash flagged |
+| `GET /v1/notes?folder=&deleted=` | note metadata, newest first |
+| `GET /v1/notes/{uuid}` | one note as Markdown, plus `degrades`/`destroys` |
+| `POST /v1/notes` | `{markdown, folder}` |
+| `PUT /v1/notes/{uuid}` | `{markdown, force}` |
+| `POST /v1/notes/{uuid}/append` | `{markdown}` |
+| `DELETE /v1/notes/{uuid}` | to Recently Deleted |
+
+Writes answer **202 Accepted**, never 200. Notes.app persists on its own
+schedule, so claiming the change is durable would be a lie — and a read straight
+after a write may not show it. A rewrite that would destroy content answers
+**409** naming what would be lost; retry with `force` to overwrite anyway.
+
+Bind to loopback and reach it over Tailscale. Binding to a routable address logs
+a warning, because the token is then the only thing between the network and
+every note on the Mac.
 
 ## Prior art
 

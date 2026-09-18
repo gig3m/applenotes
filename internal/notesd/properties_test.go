@@ -1,0 +1,250 @@
+package notesd
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// These tests were written before the daemon, to pin the properties that matter
+// rather than the shape of the code. They describe what must be true of every
+// route, so a route added later without thinking is caught by the table.
+
+// routes lists every endpoint with a request body that should otherwise be
+// valid. Adding a route means adding a row, and every property below then
+// applies to it automatically.
+func routes() []struct {
+	method, path, body string
+	mutates            bool
+} {
+	return []struct {
+		method, path, body string
+		mutates            bool
+	}{
+		{"GET", "/v1/healthz", "", false},
+		{"GET", "/v1/folders", "", false},
+		{"GET", "/v1/notes", "", false},
+		{"GET", "/v1/notes/UUID-PLAIN", "", false},
+		{"POST", "/v1/notes", `{"markdown":"hello"}`, true},
+		{"PUT", "/v1/notes/UUID-PLAIN", `{"markdown":"hello"}`, true},
+		{"POST", "/v1/notes/UUID-PLAIN/append", `{"markdown":"more"}`, true},
+		{"DELETE", "/v1/notes/UUID-PLAIN", "", true},
+	}
+}
+
+// Property: no route is reachable without the token, and healthz is not an
+// exception. A daemon on a shared tailnet has no other perimeter.
+func TestEveryRouteRequiresAuth(t *testing.T) {
+	srv := newTestServer(t)
+	for _, r := range routes() {
+		for _, auth := range []string{"", "Bearer wrong", "Basic " + testToken} {
+			rec := srv.do(t, r.method, r.path, r.body, auth)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s with %q: got %d, want 401", r.method, r.path, auth, rec.Code)
+			}
+		}
+	}
+}
+
+// Property: a wrong token must not be distinguishable from a missing one by
+// anything the response says.
+func TestAuthFailuresAreIndistinguishable(t *testing.T) {
+	srv := newTestServer(t)
+	var bodies []string
+	for _, auth := range []string{"", "Bearer wrong", "Bearer " + testToken + "x"} {
+		bodies = append(bodies, srv.do(t, "GET", "/v1/notes", "", auth).Body.String())
+	}
+	for i := 1; i < len(bodies); i++ {
+		if bodies[i] != bodies[0] {
+			t.Errorf("auth failures differ: %q vs %q", bodies[0], bodies[i])
+		}
+	}
+}
+
+// Property: malformed input never reaches Notes as something the daemon failed
+// to anticipate. Either it is rejected with a 4xx, or it is handled exactly as
+// a valid request would be -- osascript does not exist here, so a valid write
+// fails at the Apple Event, and matching that status means the daemon treated
+// the input uniformly rather than stumbling on it.
+func TestMalformedInputIsNeverServerError(t *testing.T) {
+	srv := newTestServer(t)
+	bodies := []string{
+		"", "{", "null", "[]", `{"markdown":null}`, `{"markdown":123}`,
+		`{"markdown":""}`, `{"markdown":"   "}`, `{"unknown":"x"}`,
+		`{"markdown":"` + strings.Repeat("x", 1<<20) + `"}`,
+		"{\"markdown\":\"a\\u0000b\"}",
+	}
+	for _, r := range routes() {
+		// DELETE carries no body, so nothing here is input it could reject.
+		if !r.mutates || r.method == "DELETE" {
+			continue
+		}
+		valid := srv.do(t, r.method, r.path, r.body, "Bearer "+testToken).Code
+		for _, b := range bodies {
+			rec := srv.do(t, r.method, r.path, b, "Bearer "+testToken)
+			if rec.Code < 500 || rec.Code == valid {
+				continue
+			}
+			t.Errorf("%s %s with %.40q: got %d, want 4xx or the valid-request status %d",
+				r.method, r.path, b, rec.Code, valid)
+		}
+	}
+}
+
+// Property: a write that would destroy content is refused, and the refusal says
+// what would have been lost. This is the guarantee the whole write path exists
+// to provide; it must not be lost at the HTTP layer.
+func TestWritesRefuseToDestroyContent(t *testing.T) {
+	srv := newTestServer(t)
+	for _, r := range routes() {
+		if !r.mutates || !strings.Contains(r.path, "UUID-PLAIN") {
+			continue
+		}
+		path := strings.Replace(r.path, "UUID-PLAIN", "UUID-ATTACH", 1)
+		rec := srv.do(t, r.method, path, r.body, "Bearer "+testToken)
+		if r.method == "DELETE" {
+			continue // deleting is recoverable; Notes keeps it for 30 days
+		}
+		if rec.Code != http.StatusConflict {
+			t.Errorf("%s %s: got %d, want 409", r.method, path, rec.Code)
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), "attachments") {
+			t.Errorf("%s %s: refusal does not say what would be lost: %s", r.method, path, rec.Body)
+		}
+	}
+}
+
+// Property: force overrides the refusal, and nothing else does.
+func TestForceOverridesOnlyWhenAsked(t *testing.T) {
+	srv := newTestServer(t)
+	rec := srv.do(t, "PUT", "/v1/notes/UUID-ATTACH", `{"markdown":"x","force":true}`, "Bearer "+testToken)
+	if rec.Code == http.StatusConflict {
+		t.Errorf("force did not override the guard: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Property: the daemon never writes to the notes database. Writes go through
+// Notes.app, which owns that file.
+func TestDatabaseIsNeverWritten(t *testing.T) {
+	srv := newTestServer(t)
+	before := srv.dbDigest(t)
+	for _, r := range routes() {
+		srv.do(t, r.method, r.path, r.body, "Bearer "+testToken)
+	}
+	if after := srv.dbDigest(t); after != before {
+		t.Error("the database changed; the daemon must only read it")
+	}
+}
+
+// Property: concurrent requests do not race. OnDegrade in particular is a field
+// on the Writer, so a shared Writer would report one request's degradation to
+// another. Run with -race.
+func TestConcurrentRequestsDoNotRace(t *testing.T) {
+	srv := newTestServer(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r := routes()[i%len(routes())]
+			srv.do(t, r.method, r.path, r.body, "Bearer "+testToken)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// Property: a write is reported as accepted, not as done. Notes.app persists on
+// its own schedule, so a 200 would be a lie about durability.
+func TestWritesReportAcceptedNotCompleted(t *testing.T) {
+	srv := newTestServer(t)
+	rec := srv.do(t, "POST", "/v1/notes", `{"markdown":"hello"}`, "Bearer "+testToken)
+	if rec.Code != http.StatusAccepted && rec.Code < 500 {
+		t.Errorf("got %d, want 202 Accepted", rec.Code)
+	}
+}
+
+// Property: reading a note reports what a rewrite would flatten, so a client can
+// warn before it round-trips the note through Markdown.
+func TestReadReportsWhatARewriteWouldFlatten(t *testing.T) {
+	srv := newTestServer(t)
+	rec := srv.do(t, "GET", "/v1/notes/UUID-DEGRADED", "", "Bearer "+testToken)
+	var got struct {
+		Degrades []string `json:"degrades"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body)
+	}
+	if len(got.Degrades) == 0 {
+		t.Error("an indented, underlined note reported nothing")
+	}
+}
+
+// Property: every response is JSON, including every error. A client should not
+// have to parse prose to find out what happened.
+func TestEveryResponseIsJSON(t *testing.T) {
+	srv := newTestServer(t)
+	for _, r := range routes() {
+		for _, auth := range []string{"", "Bearer " + testToken} {
+			rec := srv.do(t, r.method, r.path, r.body, auth)
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("%s %s (auth %q): Content-Type %q", r.method, r.path, auth, ct)
+			}
+			if rec.Body.Len() > 0 && !json.Valid(rec.Body.Bytes()) {
+				t.Errorf("%s %s: body is not JSON: %s", r.method, r.path, rec.Body)
+			}
+		}
+	}
+}
+
+// Property: an unknown route is a clean 404, not a panic or a redirect.
+func TestUnknownRoutesAreNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	for _, path := range []string{"/", "/v1", "/v1/notes/../../etc/passwd", "/v1/notes//append", "/v2/notes"} {
+		rec := srv.do(t, "GET", path, "", "Bearer "+testToken)
+		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s: got %d, want 404 or 405", path, rec.Code)
+		}
+	}
+}
+
+// --- harness -----------------------------------------------------------------
+
+const testToken = "test-token-0123456789"
+
+type testServer struct {
+	h      http.Handler
+	dbPath string
+}
+
+func (s *testServer) do(t *testing.T, method, path, body, auth string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, r)
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.h.ServeHTTP(rec, req)
+	return rec
+}
+
+func (s *testServer) dbDigest(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(s.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}

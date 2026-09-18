@@ -19,6 +19,11 @@ import (
 
 // ErrNotPermitted is returned when macOS has not granted Automation access to
 // Notes.app for this binary.
+// ErrInvalidArgument reports an argument this package will not pass to
+// osascript: one containing a NUL, invalid UTF-8, or too large for argv. It is
+// a property of the caller's input, not a failure of the Apple Event.
+var ErrInvalidArgument = errors.New("applescript: unusable argument")
+
 var ErrNotPermitted = errors.New("applescript: not permitted to control Notes (grant Automation access, or run from a logged-in GUI session)")
 
 // Timeout bounds a single Apple Event. They are slow, and a blocked consent
@@ -40,15 +45,15 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 	total := 0
 	for i, a := range args {
 		if strings.ContainsRune(a, 0) {
-			return "", fmt.Errorf("applescript: argument %d contains a NUL byte", i+1)
+			return "", fmt.Errorf("%w: argument %d contains a NUL byte", ErrInvalidArgument, i+1)
 		}
 		if !utf8.ValidString(a) {
-			return "", fmt.Errorf("applescript: argument %d is not valid UTF-8", i+1)
+			return "", fmt.Errorf("%w: argument %d is not valid UTF-8", ErrInvalidArgument, i+1)
 		}
 		total += len(a)
 	}
 	if total > MaxArgBytes {
-		return "", fmt.Errorf("applescript: %d bytes of arguments exceeds the %d byte limit", total, MaxArgBytes)
+		return "", fmt.Errorf("%w: %d bytes of arguments exceeds the %d byte limit", ErrInvalidArgument, total, MaxArgBytes)
 	}
 
 	deadlineCtx, cancel := context.WithTimeout(ctx, Timeout)
