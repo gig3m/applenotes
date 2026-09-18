@@ -237,6 +237,7 @@ on a tailnet there is no other perimeter.
 | `PUT /v1/notes/{uuid}` | `{markdown, force}` |
 | `POST /v1/notes/{uuid}/append` | `{markdown}` |
 | `DELETE /v1/notes/{uuid}` | to Recently Deleted |
+| `POST /mcp` | MCP over JSON-RPC, same token |
 
 Writes answer **202 Accepted**, never 200. Notes.app persists on its own
 schedule, so claiming the change is durable would be a lie — and a read straight
@@ -258,6 +259,18 @@ in the way — has to be deliberate. The daemon says so in its log if you do it.
 There is no TLS, and it does not need `tailscale serve`: the tailnet is already
 an encrypted channel, so a proxy in front would only add a certificate you have
 no use for.
+
+### As an MCP server
+
+`POST /mcp` speaks MCP over JSON-RPC 2.0, behind the same bearer token, so an
+agent can use the library as tools: `list_notes`, `get_note`, `list_folders`,
+`create_note`, `append_note`, `replace_note`, `delete_note`.
+
+`get_note` reports `degrades` and `destroys` alongside the Markdown, and a
+refused rewrite comes back as a tool error naming what would be lost — so a
+model learns the cost before it rewrites something, rather than discovering it
+afterwards. Tool failures are always in band: a missing note is an answer, not a
+dropped connection.
 
 ## From Linux
 

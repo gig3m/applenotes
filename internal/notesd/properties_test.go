@@ -37,6 +37,9 @@ func routes() []struct {
 		{"PUT", "/v1/notes/UUID-PLAIN", `{"markdown":"hello"}`, true},
 		{"POST", "/v1/notes/UUID-PLAIN/append", `{"markdown":"more"}`, true},
 		{"DELETE", "/v1/notes/UUID-PLAIN", "", true},
+		// MCP is subject to every property above: auth, JSON-ness, no 5xx on
+		// malformed input, never writing the database.
+		{"POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, false},
 	}
 }
 

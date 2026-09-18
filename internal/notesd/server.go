@@ -46,6 +46,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/notes/{uuid}", s.replaceNote)
 	mux.HandleFunc("POST /v1/notes/{uuid}/append", s.appendNote)
 	mux.HandleFunc("DELETE /v1/notes/{uuid}", s.deleteNote)
+	// MCP lives beside the REST routes and behind the same token, matching
+	// what applereminders serves on the same Mac.
+	mux.HandleFunc("POST /mcp", s.mcp)
 	return recoverPanics(s.authenticated(rejectUncleanPaths(jsonErrors(mux))))
 }
 
