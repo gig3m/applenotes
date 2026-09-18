@@ -86,7 +86,8 @@ The read path is complete and validated against a real library.
 - [x] `notesd` HTTP+JSON daemon
 - [ ] LaunchAgent and installer
 - [ ] installer / TCC grants
-- [ ] Linux TUI and Omarchy bar client
+- [x] Linux client (`notes -server`)
+- [ ] TUI and Omarchy bar client
 
 ## Usage
 
@@ -236,6 +237,24 @@ after a write may not show it. A rewrite that would destroy content answers
 Bind to loopback and reach it over Tailscale. Binding to a routable address logs
 a warning, because the token is then the only thing between the network and
 every note on the Mac.
+
+## From Linux
+
+The same `notes` binary works against a remote Mac. Point it at notesd and it
+uses HTTP instead of a local database:
+
+```
+export NOTESD_URL=http://cable:8437
+export NOTESD_TOKEN=$(ssh cable cat ~/.config/applenotes/token)
+
+notes list
+notes show <uuid>
+```
+
+`-server` also reads the token from `~/.config/applenotes/token` if the
+environment is not set. Send it over Tailscale; there is no TLS, because the
+tailnet is the encrypted channel and certificates on a loopback service would
+buy nothing.
 
 ## Prior art
 

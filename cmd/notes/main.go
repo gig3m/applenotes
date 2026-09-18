@@ -49,6 +49,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	// refactor dereferences.
 	folder := fs.String("folder", "", "list: limit to a folder, by name or UUID")
 	deleted := fs.Bool("deleted", false, "list: include notes in Recently Deleted")
+	server := fs.String("server", os.Getenv("NOTESD_URL"), "notesd URL; reads and writes go over HTTP instead of the local database")
+	token := fs.String("token", "", "bearer token for -server (default: $NOTESD_TOKEN, or ~/.config/applenotes/token)")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -72,15 +74,27 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 		if fs.NArg() > 0 {
 			return usageErr("list takes no arguments (did you mean -folder %s?)", fs.Arg(0))
 		}
+		if *server != "" {
+			err = remoteList(stdout, *server, *token, *folder, *deleted)
+			break
+		}
 		err = list(stdout, *dbPath, *folder, *deleted)
 	case "folders":
 		if fs.NArg() > 0 {
 			return usageErr("folders takes no arguments")
 		}
+		if *server != "" {
+			err = remoteFolders(stdout, *server, *token)
+			break
+		}
 		err = folders(stdout, *dbPath)
 	case "show":
 		if fs.NArg() != 1 {
 			return usageErr("show needs exactly one note UUID")
+		}
+		if *server != "" {
+			err = remoteShow(stdout, *server, *token, fs.Arg(0))
+			break
 		}
 		err = show(stdout, *dbPath, fs.Arg(0))
 	case "new":
@@ -134,7 +148,10 @@ commands:
   decode                           decode a raw ZICNOTEDATA blob on stdin
 
 common flags:
-  -db PATH   path to NoteStore.sqlite (default: the current user's)
+  -db PATH       path to NoteStore.sqlite (default: the current user's)
+  -server URL    talk to notesd on a Mac instead of a local database
+                 (default $NOTESD_URL; token from $NOTESD_TOKEN or
+                 ~/.config/applenotes/token)
 
 -folder matches a folder by name or UUID and does not descend into
 subfolders. Notes in Recently Deleted are hidden unless -deleted is given.

@@ -1,3 +1,5 @@
 blobs/
 /notes
+/notesd
 *.gz
+.claude/
