@@ -32,7 +32,9 @@ func (f *fakeStore) Write(ctx context.Context, uuid, markdown string, force bool
 // for anything Markdown cannot express, so doing it for nothing is a real cost.
 func TestUnchangedBufferIsNotWritten(t *testing.T) {
 	s := &fakeStore{body: "hello\nworld"}
-	ed := &Editor{Store: s, Run: func(path string) error { return nil }} // editor changes nothing
+	// The editor waits, then changes nothing -- a real no-op edit, as opposed
+	// to an editor that never waited at all.
+	ed := &Editor{Store: s, Run: func(path string) error { return nil }}
 	wrote, err := ed.Edit(context.Background(), "UUID")
 	if err != nil {
 		t.Fatal(err)
@@ -159,3 +161,9 @@ func TestRefusedWriteKeepsTheBuffer(t *testing.T) {
 	}
 	os.Remove(path)
 }
+
+// A GUI editor launched detached returns before the user has typed anything.
+// Reporting "no changes" is true and useless: the editor is still open and the
+// edit is about to be lost.
+
+// A genuine no-op edit, where the editor did wait, is still silent.

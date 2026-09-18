@@ -86,7 +86,7 @@ The read path is complete and validated against a real library.
 - [x] `notesd` HTTP+JSON daemon
 - [x] LaunchAgent and installer
 - [x] Linux client (`notes -server`)
-- [x] `edit` in $EDITOR, and `capture` for one-line entry
+- [x] `edit` in your editor, and `capture` for one-line entry
 - [x] status bar module (`notes bar`)
 
 ## Usage
@@ -99,9 +99,26 @@ notes new [-folder NAME]               create a note from Markdown on stdin
 notes append <uuid>                    append Markdown from stdin to a note
 notes replace <uuid>                   overwrite a note with Markdown from stdin
 notes rm <uuid>                        move a note to Recently Deleted
-notes edit [-force] <uuid>             open a note in $EDITOR, write it back
+notes edit [-force] <uuid>             open a note in an editor, write it back
 notes capture [text…]                  make a note from one line, or from stdin
 notes decode                           decode a raw ZICNOTEDATA blob on stdin
+```
+
+### Which editor `edit` uses
+
+`NOTES_EDITOR`, then `$VISUAL`, then `$EDITOR`, then the first terminal editor
+found on `PATH`.
+
+`$EDITOR` is skipped when it will not wait. On a desktop it is often a launcher
+that hands the file to a GUI window and returns straight away, and the buffer is
+then read back unchanged with the edit still untyped. Rather than lose the edit
+or ask you to reconfigure your system for one command, `edit` falls back to a
+terminal editor and says so. `NOTES_EDITOR` overrides the choice and is obeyed
+exactly:
+
+```sh
+NOTES_EDITOR=nvim notes edit <uuid>
+NOTES_EDITOR='code -w' notes edit <uuid>   # a GUI editor, told to wait
 ```
 
 `edit` deliberately has no built-in editor: editing prose is solved, and you
