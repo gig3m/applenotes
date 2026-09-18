@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
-LABEL="io.nrsil.notesd"
+LABEL="dev.applenotes.notesd"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BIN="$PREFIX/bin/notesd"
 

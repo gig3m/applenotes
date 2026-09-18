@@ -163,8 +163,8 @@ func TestFontWeightIsAStyleEnum(t *testing.T) {
 }
 
 func TestLinksArePreserved(t *testing.T) {
-	got := decode(t, blob("ref", run(3, 0, -2, "https://ref.ly/Heb13.17;nkjv"))).Markdown()
-	want := "[ref](https://ref.ly/Heb13.17;nkjv)"
+	got := decode(t, blob("ref", run(3, 0, -2, "https://example.com/a;b"))).Markdown()
+	want := "[ref](https://example.com/a;b)"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}

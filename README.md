@@ -18,8 +18,8 @@ And **AppleScript silently destroys hyperlinks.** Ask Notes for a note's body
 and a link comes back as underlined text with the URL gone:
 
 ```
-stored in the note:   <a href="https://ref.ly/Heb13.17;nkjv">Hebrews 13:17</a>
-AppleScript returns:  <u>Hebrews 13:17</u>
+stored in the note:   <a href="https://example.com/ref">a link</a>
+AppleScript returns:  <u>a link</u>
 ```
 
 Read a note that way, edit it, write it back, and every link in it is gone —
@@ -84,8 +84,7 @@ The read path is complete and validated against a real library.
 - [x] `notes` CLI: list, folders, show, decode
 - [x] write path via Apple Events (`new`, `append`, `replace`, `rm`)
 - [x] `notesd` HTTP+JSON daemon
-- [ ] LaunchAgent and installer
-- [ ] installer / TCC grants
+- [x] LaunchAgent and installer
 - [x] Linux client (`notes -server`)
 - [x] `edit` in $EDITOR, and `capture` for one-line entry
 - [x] status bar module (`notes bar`)
@@ -254,8 +253,8 @@ The same `notes` binary works against a remote Mac. Point it at notesd and it
 uses HTTP instead of a local database:
 
 ```
-export NOTESD_URL=http://cable:8437
-export NOTESD_TOKEN=$(ssh cable cat ~/.config/applenotes/token)
+export NOTESD_URL=http://notes-mac:8437
+export NOTESD_TOKEN=$(ssh notes-mac cat ~/.config/applenotes/token)
 
 notes list
 notes show <uuid>

@@ -44,11 +44,11 @@ func newTestDB(t *testing.T) string {
 	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES
 		(1, 'DefaultFolder-CloudKit', 'Notes'),
 		(2, 'TrashFolder-CloudKit', 'Recently Deleted'),
-		(3, 'FOLDER-UUID-3', 'Southside')`)
+		(3, 'FOLDER-UUID-3', 'Work')`)
 	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2, ZMARKEDFORDELETION)
 		VALUES (4, 'FOLDER-UUID-4', 'Gone', 1)`)
 
-	// 100: normal. 101: in Southside. 102: flagged deleted. 103: in the trash
+	// 100: normal. 101: in Work. 102: flagged deleted. 103: in the trash
 	// folder but not flagged. 104: password-protected.
 	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT
 		(Z_PK, ZIDENTIFIER, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZCREATIONDATE1, ZMODIFICATIONDATE1, ZMARKEDFORDELETION, ZISPINNED, ZISPASSWORDPROTECTED) VALUES
@@ -304,7 +304,7 @@ func copyFile(t *testing.T, src, dst string) {
 
 func TestNotesFolderFilter(t *testing.T) {
 	s := openTest(t)
-	for _, key := range []string{"Southside", "FOLDER-UUID-3"} {
+	for _, key := range []string{"Work", "FOLDER-UUID-3"} {
 		got, err := s.Notes(ListOptions{Folder: key})
 		if err != nil {
 			t.Fatal(err)

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
-LABEL="io.nrsil.notesd"
+LABEL="dev.applenotes.notesd"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 TOKEN="$HOME/.config/applenotes/token"
 ADDR="${ADDR:-127.0.0.1:8437}"
