@@ -124,6 +124,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 		err = editNote(stderr, *dbPath, *server, *token, fs.Arg(0), *force)
 	case "capture":
 		err = captureNote(stdin, stdout, stderr, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "))
+	case "bar":
+		if fs.NArg() > 0 {
+			return usageErr("bar takes no arguments")
+		}
+		err = bar(stdout, *dbPath, *server, *token, *folder)
 	case "decode":
 		if fs.NArg() > 0 {
 			return usageErr("decode reads from stdin and takes no arguments")
@@ -153,6 +158,7 @@ commands:
   replace [-force] <uuid>          overwrite a note with Markdown from stdin
   edit [-force] <uuid>             open a note in $EDITOR and write it back
   capture [text…]                  make a note from one line, or from stdin
+  bar                              one line of JSON for a status bar
   rm <uuid>                        move a note to Recently Deleted
   decode                           decode a raw ZICNOTEDATA blob on stdin
 

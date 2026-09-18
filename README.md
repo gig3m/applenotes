@@ -88,7 +88,7 @@ The read path is complete and validated against a real library.
 - [ ] installer / TCC grants
 - [x] Linux client (`notes -server`)
 - [x] `edit` in $EDITOR, and `capture` for one-line entry
-- [ ] Omarchy bar client
+- [x] status bar module (`notes bar`)
 
 ## Usage
 
@@ -265,6 +265,27 @@ notes show <uuid>
 environment is not set. Send it over Tailscale; there is no TLS, because the
 tailnet is the encrypted channel and certificates on a loopback service would
 buy nothing.
+
+## In a status bar
+
+`notes bar` prints one JSON object per run, in the shape waybar and the Omarchy
+bar read. It always prints valid JSON — including when the Mac is asleep, which
+is the normal case rather than an error. A module that exits non-zero or prints
+nothing leaves a blank slot with no explanation.
+
+```jsonc
+// ~/.config/waybar/config
+"custom/notes": {
+  "exec": "notes bar",
+  "return-type": "json",
+  "interval": 300,
+  "on-click": "foot -e sh -c 'notes capture'"
+}
+```
+
+The `class` is `ok` or `unreachable`, so the bar can style a sleeping Mac
+differently rather than showing a number that is quietly stale. `alt` carries
+the most recent note's UUID, for an `on-click` that opens it.
 
 ## Prior art
 

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
+	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -169,4 +172,63 @@ func blob(t *testing.T, attach bool) []byte {
 	zw.Write(raw)
 	zw.Close()
 	return buf.Bytes()
+}
+
+// A status bar redraws on a timer and reads one JSON object per run. A module
+// that exits non-zero, prints nothing, or prints something unparseable leaves a
+// blank slot with no explanation -- so these hold even when the Mac is asleep.
+func TestBarAlwaysEmitsOneValidJSONObject(t *testing.T) {
+	for _, tc := range []struct{ name, db, server string }{
+		{"local database", fixture(t), ""},
+		{"unreachable server", "", "http://127.0.0.1:1"},
+		{"missing database", filepath.Join(t.TempDir(), "absent.sqlite"), ""},
+	} {
+		args := []string{"bar"}
+		if tc.server != "" {
+			args = append(args, "-server", tc.server, "-token", "t")
+		}
+		var out, errb bytes.Buffer
+		code := run(append(args[:1:1], args[1:]...), strings.NewReader(""), &out, &errb)
+		if tc.db != "" {
+			out.Reset()
+			errb.Reset()
+			code = run([]string{"bar", "-db", tc.db}, strings.NewReader(""), &out, &errb)
+		}
+		if code != 0 {
+			t.Errorf("%s: exit %d, stderr %q", tc.name, code, errb.String())
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Errorf("%s: not JSON: %q", tc.name, out.String())
+			continue
+		}
+		if _, ok := got["text"]; !ok {
+			t.Errorf("%s: no text field: %q", tc.name, out.String())
+		}
+		if _, ok := got["class"]; !ok {
+			t.Errorf("%s: no class field: %q", tc.name, out.String())
+		}
+	}
+}
+
+// The token must never reach the bar's tooltip, which ends up on screen and in
+// the bar's own logs.
+func TestBarNeverLeaksTheToken(t *testing.T) {
+	const secret = "supersecrettoken"
+	var out, errb bytes.Buffer
+	run([]string{"bar", "-server", "http://127.0.0.1:1", "-token", secret},
+		strings.NewReader(""), &out, &errb)
+	if strings.Contains(out.String()+errb.String(), secret) {
+		t.Errorf("token leaked: %q %q", out.String(), errb.String())
+	}
+}
+
+// An unreachable Mac is the normal case, not a failure worth blocking on.
+func TestBarFailsFast(t *testing.T) {
+	start := time.Now()
+	var out bytes.Buffer
+	run([]string{"bar", "-server", "http://127.0.0.1:1", "-token", "t"}, strings.NewReader(""), &out, io.Discard)
+	if d := time.Since(start); d > barTimeout*2 {
+		t.Errorf("took %s", d)
+	}
 }
