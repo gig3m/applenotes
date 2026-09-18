@@ -33,6 +33,7 @@ func routes() []struct {
 		{"GET", "/v1/folders", "", false},
 		{"GET", "/v1/notes", "", false},
 		{"GET", "/v1/notes/UUID-PLAIN", "", false},
+		{"GET", "/v1/search?q=text", "", false},
 		{"POST", "/v1/notes", `{"markdown":"hello"}`, true},
 		{"PUT", "/v1/notes/UUID-PLAIN", `{"markdown":"hello"}`, true},
 		{"POST", "/v1/notes/UUID-PLAIN/append", `{"markdown":"more"}`, true},

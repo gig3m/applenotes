@@ -102,6 +102,21 @@ var mcpTools = []map[string]any{
 		},
 	},
 	{
+		"name": "search_notes",
+		"description": "Find notes containing a phrase, searching bodies as well as titles. " +
+			"Returns each hit with surrounding context, best first. Use this rather than " +
+			"listing every note when looking for something by what it says.",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query":   map[string]any{"type": "string"},
+				"folder":  map[string]any{"type": "string"},
+				"deleted": map[string]any{"type": "boolean"},
+			},
+			"required": []string{"query"},
+		},
+	},
+	{
 		"name":        "get_note",
 		"description": "Read one note as Markdown, by uuid. Also reports what a rewrite would flatten or destroy.",
 		"inputSchema": map[string]any{
@@ -174,6 +189,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 			Folder   string `json:"folder"`
 			Markdown string `json:"markdown"`
 			Deleted  bool   `json:"deleted"`
+			Query    string `json:"query"`
 			Force    bool   `json:"force"`
 		} `json:"arguments"`
 	}
@@ -202,6 +218,23 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 		out := make([]folderJSON, 0, len(fs))
 		for _, f := range fs {
 			out = append(out, folderJSON{UUID: f.UUID, Name: f.Name, Trash: f.Trash()})
+		}
+		return toolJSON(out)
+
+	case "search_notes":
+		hits, err := s.store.Search(notestore.SearchOptions{
+			Query: a.Query, Folder: a.Folder, IncludeDeleted: a.Deleted})
+		if err != nil {
+			return toolResult(err.Error(), true)
+		}
+		out := make([]map[string]any, 0, len(hits))
+		for _, h := range hits {
+			out = append(out, map[string]any{
+				"uuid": h.UUID, "title": h.Title, "folder": h.FolderName,
+				"modified": h.Modified, "context": h.Context})
+		}
+		if len(out) == 0 {
+			return toolResult("no notes contain "+a.Query, false)
 		}
 		return toolJSON(out)
 

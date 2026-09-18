@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/folders", s.folders)
 	mux.HandleFunc("GET /v1/notes", s.listNotes)
 	mux.HandleFunc("GET /v1/notes/{uuid}", s.getNote)
+	mux.HandleFunc("GET /v1/search", s.search)
 	mux.HandleFunc("POST /v1/notes", s.createNote)
 	mux.HandleFunc("PUT /v1/notes/{uuid}", s.replaceNote)
 	mux.HandleFunc("POST /v1/notes/{uuid}/append", s.appendNote)
@@ -207,6 +208,31 @@ func (s *Server) listNotes(w http.ResponseWriter, r *http.Request) {
 	out := make([]noteJSON, 0, len(notes))
 	for _, n := range notes {
 		out = append(out, metaJSON(n))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type hitJSON struct {
+	noteJSON
+	Context string `json:"context"`
+	Score   int    `json:"score"`
+}
+
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	hits, err := s.store.Search(notestore.SearchOptions{
+		Query:          q.Get("q"),
+		Folder:         q.Get("folder"),
+		IncludeDeleted: q.Get("deleted") == "true",
+	})
+	if err != nil {
+		// An empty query is the caller's mistake, not a server failure.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out := make([]hitJSON, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, hitJSON{noteJSON: metaJSON(h.NoteMeta), Context: h.Context, Score: h.Score})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

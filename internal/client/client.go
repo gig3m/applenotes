@@ -109,6 +109,25 @@ func (c *Client) Notes(ctx context.Context, opt ListOptions) ([]Note, error) {
 	return out, c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
+// Hit is one search result: a note plus the matching text in context.
+type Hit struct {
+	Note
+	Context string `json:"context"`
+	Score   int    `json:"score"`
+}
+
+func (c *Client) Search(ctx context.Context, query, folder string, deleted bool) ([]Hit, error) {
+	q := url.Values{"q": {query}}
+	if folder != "" {
+		q.Set("folder", folder)
+	}
+	if deleted {
+		q.Set("deleted", "true")
+	}
+	var out []Hit
+	return out, c.do(ctx, http.MethodGet, "/v1/search?"+q.Encode(), nil, &out)
+}
+
 func (c *Client) Note(ctx context.Context, uuid string) (Note, error) {
 	var out Note
 	return out, c.do(ctx, http.MethodGet, "/v1/notes/"+url.PathEscape(uuid), nil, &out)
