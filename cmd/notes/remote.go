@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/gig3m/applenotes/internal/client"
+	"github.com/gig3m/applenotes/internal/notestore"
 )
 
 // The remote commands mirror the local ones against notesd, so the same binary
@@ -92,5 +93,143 @@ func remoteShow(stdout io.Writer, server, token, uuid string) error {
 		return fmt.Errorf("%s is password-protected; its body is not readable", n.Title)
 	}
 	fmt.Fprintln(stdout, n.Markdown)
+	return nil
+}
+
+func search(stdout io.Writer, dbPath, server, token, folder, query string, deleted bool) error {
+	type row struct{ modified, folder, uuid, title, context string }
+	var rows []row
+
+	if server != "" {
+		c, err := remoteClient(server, token)
+		if err != nil {
+			return err
+		}
+		hits, err := c.Search(context.Background(), query, folder, deleted)
+		if err != nil {
+			return err
+		}
+		for _, h := range hits {
+			rows = append(rows, row{h.Modified.Local().Format("2006-01-02 15:04"), h.Folder, h.UUID, h.Title, h.Context})
+		}
+	} else {
+		s, err := notestore.Open(dbPath)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		hits, err := s.Search(notestore.SearchOptions{Query: query, Folder: folder, IncludeDeleted: deleted})
+		if err != nil {
+			return err
+		}
+		for _, h := range hits {
+			rows = append(rows, row{h.Modified.Local().Format("2006-01-02 15:04"), h.FolderName, h.UUID, h.Title, h.Context})
+		}
+	}
+
+	if len(rows) == 0 {
+		fmt.Fprintf(stdout, "no notes contain %q\n", query)
+		return nil
+	}
+	// One note per stanza rather than a table: the context is the point, and a
+	// column would truncate it to uselessness.
+	for _, r := range rows {
+		title := r.title
+		if title == "" {
+			title = "(untitled)"
+		}
+		fmt.Fprintf(stdout, "%s  %s\n  %s  %s\n  %s\n\n", r.modified, title, r.folder, r.uuid, r.context)
+	}
+	return nil
+}
+
+// The write commands below exist because the machine driving this is usually
+// not the Mac holding the notes: without them, creating or deleting a note from
+// Linux fails on a database that was never going to be there.
+
+// readBody reads Markdown from stdin and refuses an empty one, so a mistyped
+// pipe cannot silently blank a note.
+func readBody(stdin io.Reader, verb string) (string, error) {
+	md, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", err
+	}
+	if len(strings.TrimSpace(string(md))) == 0 {
+		return "", fmt.Errorf("refusing to %s an empty body", verb)
+	}
+	return string(md), nil
+}
+
+func remoteNew(stdin io.Reader, stdout, stderr io.Writer, server, token, folder string) error {
+	md, err := readBody(stdin, "create a note with")
+	if err != nil {
+		return err
+	}
+	c, err := remoteClient(server, token)
+	if err != nil {
+		return err
+	}
+	uuid, err := c.Create(context.Background(), folder, md)
+	if err != nil {
+		return err
+	}
+	// The daemon reports the note created but not yet in the database as an
+	// empty UUID; saying nothing would look like a silent failure.
+	if uuid == "" {
+		fmt.Fprintln(stderr,
+			"notes: the note was created, but Notes.app has not written it to the\n"+
+				"       database yet, so its UUID is not known. Run 'notes list' later.")
+		return nil
+	}
+	fmt.Fprintln(stdout, uuid)
+	warnLag(stderr)
+	return nil
+}
+
+func remoteAppend(stdin io.Reader, stderr io.Writer, server, token, uuid string) error {
+	md, err := readBody(stdin, "append")
+	if err != nil {
+		return err
+	}
+	c, err := remoteClient(server, token)
+	if err != nil {
+		return err
+	}
+	degraded, err := c.Append(context.Background(), uuid, md)
+	if err != nil {
+		return err
+	}
+	warnDegraded(stderr, degraded)
+	warnLag(stderr)
+	return nil
+}
+
+func remoteReplace(stdin io.Reader, stderr io.Writer, server, token, uuid string, force bool) error {
+	md, err := readBody(stdin, "replace a note with")
+	if err != nil {
+		return err
+	}
+	c, err := remoteClient(server, token)
+	if err != nil {
+		return err
+	}
+	degraded, err := c.Replace(context.Background(), uuid, md, force)
+	if err != nil {
+		return err
+	}
+	warnDegraded(stderr, degraded)
+	warnLag(stderr)
+	return nil
+}
+
+func remoteRm(stderr io.Writer, server, token, uuid string) error {
+	c, err := remoteClient(server, token)
+	if err != nil {
+		return err
+	}
+	if err := c.Delete(context.Background(), uuid); err != nil {
+		return err
+	}
+	fmt.Fprintln(stderr, "notes: moved to Recently Deleted.")
 	return nil
 }

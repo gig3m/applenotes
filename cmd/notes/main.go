@@ -50,7 +50,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 
 	// Flags are parsed per subcommand rather than globally: the stdlib flag
 	// package stops at the first non-flag argument, so a global FlagSet would
-	// silently ignore everything after the command name.
+	// silently ignore everything after the command name. permute below deals
+	// with the same rule biting again inside a subcommand.
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(stdout, usageText) } // -h is not an error
 	fs.SetOutput(stderr)
@@ -63,7 +64,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	server := fs.String("server", os.Getenv("NOTESD_URL"), "notesd URL; reads and writes go over HTTP instead of the local database")
 	token := fs.String("token", "", "bearer token for -server (default: $NOTESD_TOKEN, or ~/.config/applenotes/token)")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(permute(fs, args[1:])); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -141,20 +142,36 @@ The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
 		if fs.NArg() > 0 {
 			return usageErr("new reads Markdown from stdin and takes no arguments")
 		}
+		if *server != "" {
+			err = remoteNew(stdin, stdout, stderr, *server, *token, *folder)
+			break
+		}
 		err = newNote(stdin, stdout, stderr, *dbPath, *folder)
 	case "append":
 		if fs.NArg() != 1 {
 			return usageErr("append needs exactly one note UUID")
+		}
+		if *server != "" {
+			err = remoteAppend(stdin, stderr, *server, *token, fs.Arg(0))
+			break
 		}
 		err = appendNote(stdin, stderr, *dbPath, fs.Arg(0))
 	case "replace":
 		if fs.NArg() != 1 {
 			return usageErr("replace needs exactly one note UUID")
 		}
+		if *server != "" {
+			err = remoteReplace(stdin, stderr, *server, *token, fs.Arg(0), *force)
+			break
+		}
 		err = replaceNote(stdin, stderr, *dbPath, fs.Arg(0), *force)
 	case "rm":
 		if fs.NArg() != 1 {
 			return usageErr("rm needs exactly one note UUID")
+		}
+		if *server != "" {
+			err = remoteRm(stderr, *server, *token, fs.Arg(0))
+			break
 		}
 		err = rmNote(stderr, *dbPath, fs.Arg(0))
 	case "edit":
@@ -164,6 +181,11 @@ The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
 		err = editNote(stderr, *dbPath, *server, *token, fs.Arg(0), *force)
 	case "capture":
 		err = captureNote(stdin, stdout, stderr, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "))
+	case "search":
+		if fs.NArg() == 0 {
+			return usageErr("search needs something to look for")
+		}
+		err = search(stdout, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "), *deleted)
 	case "bar":
 		if fs.NArg() > 0 {
 			return usageErr("bar takes no arguments")
@@ -192,15 +214,22 @@ const usageText = `usage: notes <command> [flags]
 commands:
   list [-folder NAME] [-deleted]   list notes, newest first
   folders                          list folders
+  search <text…>                   find notes containing a phrase, bodies too
   show <uuid>                      print one note as Markdown
   new [-folder NAME]               create a note from Markdown on stdin
   append <uuid>                    append Markdown from stdin to a note
   replace [-force] <uuid>          overwrite a note with Markdown from stdin
-  edit [-force] <uuid>             open a note in $EDITOR and write it back
+  edit [-force] <uuid>             open a note in an editor, write it back
   capture [text…]                  make a note from one line, or from stdin
   bar                              one line of JSON for a status bar
   rm <uuid>                        move a note to Recently Deleted
   decode                           decode a raw ZICNOTEDATA blob on stdin
+
+environment:
+  NOTES_EDITOR   editor for 'edit'. Falls back to $VISUAL, then $EDITOR, then
+                 a terminal editor on PATH. An $EDITOR that does not wait for
+                 you to finish (a desktop launcher) is not used, since the edit
+                 would be lost; set NOTES_EDITOR to override that.
 
 common flags:
   -db PATH       path to NoteStore.sqlite (default: the current user's)
@@ -436,4 +465,51 @@ func decode(r io.Reader, stdout io.Writer) error {
 	}
 	fmt.Fprintln(stdout, n.Markdown())
 	return nil
+}
+
+// permute moves flags ahead of positional arguments, so that
+//
+//	notes rm <uuid> -server URL
+//
+// means what it looks like. The stdlib flag package stops at the first
+// non-flag argument, so without this the -server above is parsed as another
+// positional and quietly does nothing -- the command then goes looking for a
+// local database on a machine that has none. Everything after a bare "--" is
+// left alone, which is how a note whose text begins with "-" gets written.
+func permute(fs *flag.FlagSet, args []string) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.ContainsRune(name, '=') {
+			continue // -flag=value carries its own value
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // unknown: let Parse report it rather than guess its arity
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue // -force takes no value; the next word is positional
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	// The "--" is re-emitted rather than dropped: without it Parse would read
+	// the moved positionals as flags again, and a note whose text starts with a
+	// dash would fail instead of being written.
+	if len(positional) == 0 {
+		return flags
+	}
+	return append(append(flags, "--"), positional...)
 }
