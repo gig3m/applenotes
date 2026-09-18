@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -163,12 +164,94 @@ func TestConcurrentRequestsDoNotRace(t *testing.T) {
 
 // Property: a write is reported as accepted, not as done. Notes.app persists on
 // its own schedule, so a 200 would be a lie about durability.
+//
+// This needs a working osascript, which the test machine does not have -- an
+// earlier version of this test allowed any 5xx and so never asserted anything.
+// fakeOsascript puts a stub on PATH so the write actually succeeds.
 func TestWritesReportAcceptedNotCompleted(t *testing.T) {
+	fakeOsascript(t)
 	srv := newTestServer(t)
-	rec := srv.do(t, "POST", "/v1/notes", `{"markdown":"hello"}`, "Bearer "+testToken)
-	if rec.Code != http.StatusAccepted && rec.Code < 500 {
-		t.Errorf("got %d, want 202 Accepted", rec.Code)
+	for _, r := range routes() {
+		if !r.mutates {
+			continue
+		}
+		rec := srv.do(t, r.method, r.path, r.body, "Bearer "+testToken)
+		if rec.Code != http.StatusAccepted {
+			t.Errorf("%s %s: got %d, want 202 Accepted (body %s)", r.method, r.path, rec.Code, rec.Body)
+		}
 	}
+}
+
+// Property: a body over the limit is refused rather than read into memory. The
+// earlier fixture stopped well short of the cap, so deleting it changed nothing.
+func TestOversizedBodyIsRefused(t *testing.T) {
+	srv := newTestServer(t)
+	big := `{"markdown":"` + strings.Repeat("x", maxBody+1024) + `"}`
+	rec := srv.do(t, "PUT", "/v1/notes/UUID-PLAIN", big, "Bearer "+testToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400 from the body cap", rec.Code)
+	}
+	// Specifically the cap, not the later argv limit: without MaxBytesReader
+	// the body decodes fine and is only refused further down, which is a 4xx
+	// too and would let the cap be deleted unnoticed.
+	if !strings.Contains(rec.Body.String(), "too large") {
+		t.Errorf("refused for the wrong reason: %s", rec.Body)
+	}
+}
+
+// Property: advice is only offered where it can be taken. append has no force,
+// so telling a caller to retry with force would send them in a circle.
+func TestRefusalAdviceMatchesTheOperation(t *testing.T) {
+	srv := newTestServer(t)
+	for _, tc := range []struct {
+		method, path string
+		wantForce    bool
+	}{
+		{"PUT", "/v1/notes/UUID-ATTACH", true},
+		{"POST", "/v1/notes/UUID-ATTACH/append", false},
+	} {
+		rec := srv.do(t, tc.method, tc.path, `{"markdown":"x"}`, "Bearer "+testToken)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s %s: got %d, want 409", tc.method, tc.path, rec.Code)
+		}
+		mentionsForce := strings.Contains(rec.Body.String(), "retry with force")
+		if mentionsForce != tc.wantForce {
+			t.Errorf("%s %s: force advice = %v, want %v: %s",
+				tc.method, tc.path, mentionsForce, tc.wantForce, rec.Body)
+		}
+	}
+}
+
+// Property: a missing note is 404 and says so, distinguishably from a missing
+// route. The mux's own 404 was swallowing handler-generated ones.
+func TestMissingNoteIsNotFoundAndSaysWhy(t *testing.T) {
+	srv := newTestServer(t)
+	for _, r := range []struct{ method, path, body string }{
+		{"GET", "/v1/notes/UUID-NOSUCH", ""},
+		{"PUT", "/v1/notes/UUID-NOSUCH", `{"markdown":"x"}`},
+	} {
+		rec := srv.do(t, r.method, r.path, r.body, "Bearer "+testToken)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s: got %d, want 404", r.method, r.path, rec.Code)
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), "no such note") {
+			t.Errorf("%s %s: cannot tell a missing note from a missing route: %s",
+				r.method, r.path, rec.Body)
+		}
+	}
+}
+
+// fakeOsascript puts a stub osascript first on PATH for the duration of a test,
+// so the write path can be exercised off a Mac.
+func fakeOsascript(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n# swallow the script on stdin, then answer as Notes would\ncat >/dev/null\necho 'x-coredata://STORE-UUID/ICNote/p10'\n"
+	if err := os.WriteFile(filepath.Join(dir, "osascript"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // Property: reading a note reports what a rewrite would flatten, so a client can

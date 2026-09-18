@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -30,15 +31,43 @@ func main() {
 		addr      = flag.String("addr", "127.0.0.1:8437", "address to listen on")
 		dbPath    = flag.String("db", "", "path to NoteStore.sqlite (default: the current user's)")
 		tokenPath = flag.String("token", defaultTokenPath(), "file holding the bearer token; created if absent")
+		listenAll = flag.Bool("listen-all", false, "permit binding to an address other than loopback (see -h)")
 	)
+	flag.Usage = usage
 	flag.Parse()
 
-	if err := run(*addr, *dbPath, *tokenPath); err != nil {
+	if err := run(*addr, *dbPath, *tokenPath, *listenAll); err != nil {
 		log.Fatalln("notesd:", err)
 	}
 }
 
-func run(addr, dbPath, tokenPath string) error {
+func usage() {
+	fmt.Fprint(os.Stderr, `usage: notesd [flags]
+
+Serves this Mac's Apple Notes over HTTP. The bearer token is the only
+perimeter, so where it listens matters.
+
+Reaching it from another machine, in order of preference:
+
+  tailscale serve --bg 8437      notesd stays on loopback; Tailscale terminates
+                                 TLS and only tailnet peers can reach it.
+
+  -addr <tailscale-ip>:8437      bind the tailnet interface directly. Requires
+                                 -listen-all. Reachable only over the tailnet.
+
+  -addr 0.0.0.0:8437             every interface, including whatever Wi-Fi this
+                                 Mac joins next. Requires -listen-all, and you
+                                 should not want this.
+
+flags:
+`)
+	flag.PrintDefaults()
+}
+
+func run(addr, dbPath, tokenPath string, listenAll bool) error {
+	if err := checkAddr(addr, listenAll); err != nil {
+		return err
+	}
 	token, err := loadOrCreateToken(tokenPath)
 	if err != nil {
 		return err
@@ -53,6 +82,11 @@ func run(addr, dbPath, tokenPath string) error {
 		Addr:              addr,
 		Handler:           notesd.New(store, token).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bytes are capped per request, but bytes are not time: without this a
+		// client that dribbles a body one byte at a time pins a goroutine and a
+		// connection indefinitely. WriteTimeout does not unblock a handler
+		// stuck reading.
+		ReadTimeout: 30 * time.Second,
 		// Generous: an Apple Event is slow, and a consent prompt makes it
 		// slower. The handler's own context bounds the work.
 		WriteTimeout: 3 * time.Minute,
@@ -64,10 +98,6 @@ func run(addr, dbPath, tokenPath string) error {
 		return err
 	}
 	log.Printf("notesd: listening on %s, token in %s", ln.Addr(), tokenPath)
-	if host, _, _ := net.SplitHostPort(addr); host != "127.0.0.1" && host != "localhost" {
-		log.Printf("notesd: WARNING listening on %s, not loopback. This exposes every note "+
-			"on this Mac to anything that can reach that address and holds the token.", host)
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -87,6 +117,37 @@ func run(addr, dbPath, tokenPath string) error {
 		defer cancel()
 		return srv.Shutdown(shutdown)
 	}
+}
+
+// checkAddr refuses a non-loopback bind without an explicit opt-in. A logged
+// warning is not enough: 0.0.0.0 means every network this Mac ever joins, and
+// the token is the only thing in the way.
+func checkAddr(addr string, listenAll bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("bad -addr %q: %w", addr, err)
+	}
+	switch host {
+	case "127.0.0.1", "::1", "localhost", "":
+		return nil
+	}
+	if !listenAll {
+		return fmt.Errorf("refusing to listen on %s without -listen-all.\n"+
+			"       Prefer leaving notesd on loopback and running:  tailscale serve --bg %s\n"+
+			"       See -h for why", host, portOf(addr))
+	}
+	if host == "0.0.0.0" || host == "::" {
+		log.Printf("notesd: listening on %s -- every interface, including whatever network "+
+			"this Mac joins next. The token is the only thing in the way.", host)
+	}
+	return nil
+}
+
+func portOf(addr string) string {
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		return port
+	}
+	return "8437"
 }
 
 func defaultTokenPath() string {
@@ -142,9 +203,4 @@ func checkPerms(path string) error {
 	return nil
 }
 
-func trimSpace(b []byte) []byte {
-	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r' || b[len(b)-1] == ' ') {
-		b = b[:len(b)-1]
-	}
-	return b
-}
+func trimSpace(b []byte) []byte { return bytes.TrimSpace(b) }

@@ -243,9 +243,17 @@ schedule, so claiming the change is durable would be a lie — and a read straig
 after a write may not show it. A rewrite that would destroy content answers
 **409** naming what would be lost; retry with `force` to overwrite anyway.
 
-Bind to loopback and reach it over Tailscale. Binding to a routable address logs
-a warning, because the token is then the only thing between the network and
-every note on the Mac.
+It refuses to bind anything but loopback without `-listen-all`, and says what to
+do instead. The intended shape is to leave it on loopback and put Tailscale in
+front, which also gives you TLS:
+
+```
+tailscale serve --bg 8437
+```
+
+`-listen-all` with a tailnet address binds that interface directly. `0.0.0.0`
+means every network the Mac ever joins, and the token is then the only thing in
+the way — the daemon says so in its log if you do it.
 
 ## From Linux
 

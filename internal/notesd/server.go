@@ -100,7 +100,12 @@ func jsonErrors(next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 		if !rec.wrote {
-			writeError(w, rec.status, http.StatusText(rec.status))
+			code := rec.status
+			if code == 0 {
+				// A handler that returned without writing anything.
+				code = http.StatusInternalServerError
+			}
+			writeError(w, code, http.StatusText(code))
 		}
 	})
 }
@@ -109,13 +114,16 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	wrote  bool
+	// ours marks a response this package produced. Only the mux's own
+	// plain-text 404/405 is suppressed; a handler's deliberate 404 -- "no such
+	// note" -- must reach the client, or a caller cannot tell a missing note
+	// from a missing route.
+	ours bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
-	// ServeMux writes a plain-text body for 404 and 405; suppress it and let
-	// jsonErrors emit JSON instead.
-	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+	if !r.ours && (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) {
 		return
 	}
 	r.wrote = true
@@ -123,8 +131,8 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
-	if !r.wrote && (r.status == http.StatusNotFound || r.status == http.StatusMethodNotAllowed) {
-		return len(b), nil // swallowed; jsonErrors will answer
+	if !r.wrote && !r.ours && (r.status == http.StatusNotFound || r.status == http.StatusMethodNotAllowed) {
+		return len(b), nil // the mux's plain text; jsonErrors will answer
 	}
 	r.wrote = true
 	return r.ResponseWriter.Write(b)
@@ -170,6 +178,9 @@ type noteJSON struct {
 	Markdown string   `json:"markdown,omitempty"`
 	Degrades []string `json:"degrades,omitempty"`
 	Destroys []string `json:"destroys,omitempty"`
+	// BodyError is set when the contents could not be read, so a client does
+	// not mistake an absent advisory for an empty one.
+	BodyError string `json:"bodyError,omitempty"`
 }
 
 func metaJSON(m notestore.NoteMeta) noteJSON {
@@ -205,11 +216,16 @@ func (s *Server) getNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := metaJSON(meta)
-	if body, err := s.store.Body(uuid); err == nil {
+	body, bodyErr := s.store.Body(uuid)
+	if bodyErr == nil {
 		out.Markdown = body.Markdown()
 		// Reported so a client can warn before round-tripping the note.
 		out.Degrades = body.Degrades()
 		out.Destroys = body.Destroys()
+	} else {
+		// Saying nothing here would read as "nothing would be destroyed",
+		// which is the opposite of what is known.
+		out.BodyError = bodyErr.Error()
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -226,7 +242,7 @@ func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uuid, err := notesapp.New(s.store).Create(r.Context(), req.Folder, req.Markdown)
-	if errors.Is(err, notesapp.ErrNotYetVisible) {
+	if err != nil && uuid == "" && errors.Is(err, notesapp.ErrNotYetVisible) {
 		// The note exists; Notes.app has not written it to the database yet, so
 		// its portable id is not knowable. Saying so beats inventing one.
 		writeJSON(w, http.StatusAccepted, map[string]any{
@@ -236,7 +252,7 @@ func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeWriteError(w, err)
+		writeWriteError(w, err, false)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "uuid": uuid})
@@ -254,7 +270,7 @@ func (s *Server) replaceNote(w http.ResponseWriter, r *http.Request) {
 	} else {
 		degraded, err = notesapp.New(s.store).Replace(r.Context(), r.PathValue("uuid"), req.Markdown)
 	}
-	s.acknowledge(w, err, degraded)
+	s.acknowledge(w, err, degraded, true)
 }
 
 func (s *Server) appendNote(w http.ResponseWriter, r *http.Request) {
@@ -263,20 +279,20 @@ func (s *Server) appendNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	degraded, err := notesapp.New(s.store).Append(r.Context(), r.PathValue("uuid"), req.Markdown)
-	s.acknowledge(w, err, degraded)
+	s.acknowledge(w, err, degraded, false)
 }
 
 func (s *Server) deleteNote(w http.ResponseWriter, r *http.Request) {
 	// Deleting moves the note to Recently Deleted, where Notes keeps it for 30
 	// days, so it is not guarded the way a rewrite is.
-	s.acknowledge(w, notesapp.New(s.store).Delete(r.Context(), r.PathValue("uuid")), nil)
+	s.acknowledge(w, notesapp.New(s.store).Delete(r.Context(), r.PathValue("uuid")), nil, false)
 }
 
 // --- plumbing ---------------------------------------------------------------
 
-func (s *Server) acknowledge(w http.ResponseWriter, err error, degraded []string) {
+func (s *Server) acknowledge(w http.ResponseWriter, err error, degraded []string, forceable bool) {
 	if err != nil {
-		writeWriteError(w, err)
+		writeWriteError(w, err, forceable)
 		return
 	}
 	// Accepted, not OK: Notes.app persists on its own schedule, so claiming the
@@ -310,14 +326,25 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
-func writeWriteError(w http.ResponseWriter, err error) {
+func forceDetail(forceable bool) string {
+	if forceable {
+		return "retry with force to overwrite anyway"
+	}
+	return "this operation has no force; edit the note in Notes.app instead"
+}
+
+// writeWriteError maps a write failure to a status. forceable says whether the
+// caller has a force option, so the advice is only given where it can be taken.
+func writeWriteError(w http.ResponseWriter, err error, forceable bool) {
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":    err.Error(),
-			"destroys": lossy.Features,
-			"detail":   "retry with force to overwrite anyway",
-		})
+		body := map[string]any{"error": err.Error(), "destroys": lossy.Features}
+		if forceable {
+			body["detail"] = "retry with force to overwrite anyway"
+		} else {
+			body["detail"] = "this operation has no force; edit the note in Notes.app instead"
+		}
+		writeJSON(w, http.StatusConflict, body)
 		return
 	}
 	if errors.Is(err, notestore.ErrNotFound) {
@@ -340,6 +367,9 @@ func writeWriteError(w http.ResponseWriter, err error) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.ours = true
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
