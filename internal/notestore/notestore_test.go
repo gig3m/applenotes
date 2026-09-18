@@ -3,6 +3,8 @@ package notestore
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,19 @@ func runIndent(length, style, indent int) []byte {
 
 func runFont(length int, name string) []byte {
 	return append(fVarint(1, uint64(length)), fBytes(3, fBytes(1, []byte(name)))...)
+}
+
+// runHeading builds a bold run at a given point size: how Notes stores a
+// heading created through HTML.
+func runHeading(length int, size float32) []byte {
+	font := append(fBytes(1, []byte("Helvetica")), fFixed32(2, math.Float32bits(size))...)
+	b := append(fVarint(1, uint64(length)), fBytes(3, font)...)
+	return append(b, fVarint(5, uint64(FontBold))...)
+}
+
+func fFixed32(num int, v uint32) []byte {
+	b := tag(num, wireFixed32)
+	return binary.LittleEndian.AppendUint32(b, v)
 }
 
 func runCheck(length int, done bool) []byte {

@@ -53,6 +53,10 @@ rather than trusting what AppleScript read back.
 - `<h1>`/`<h2>` are lowered to bold 24px/18px spans on write.
 - Adjacent `<ul>` and `<ol>` merge into one list. Separate them with a
   `<div><br></div>`.
+- A heading created through HTML is stored as bold text at an enlarged point
+  size with no paragraph style, so it is recovered by size on read (24pt → `#`,
+  18pt → `##`). Text you manually bolded and enlarged will therefore read back
+  as a heading.
 - Locked (password-protected) notes are listed with their metadata, but
   their bodies are encrypted and are not readable here.
 
@@ -78,7 +82,7 @@ The read path is complete and validated against a real library.
 - [x] Markdown rendering (headings, lists, checklists, emphasis, links)
 - [x] SQLite index reader (titles, folders, UUIDs, timestamps)
 - [x] `notes` CLI: list, folders, show, decode
-- [ ] write path via Apple Events
+- [x] write path via Apple Events (`new`, `append`, `replace`, `rm`)
 - [ ] `notesd` HTTP+JSON daemon and LaunchAgent
 - [ ] installer / TCC grants
 - [ ] Linux TUI and Omarchy bar client
@@ -89,8 +93,54 @@ The read path is complete and validated against a real library.
 notes list [-folder NAME] [-deleted]   list notes, newest first
 notes folders                          list folders
 notes show <uuid>                      print one note as Markdown
+notes new [-folder NAME]               create a note from Markdown on stdin
+notes append <uuid>                    append Markdown from stdin to a note
+notes replace <uuid>                   overwrite a note with Markdown from stdin
+notes rm <uuid>                        move a note to Recently Deleted
 notes decode                           decode a raw ZICNOTEDATA blob on stdin
 ```
+
+### Writing
+
+Writes go through Apple Events to Notes.app, never through SQLite — the
+database handle is opened read-only and Notes owns its own file. This needs
+Automation access to Notes; see [Security](#security).
+
+Markdown round-trips: headings, bullets, numbered lists, bold, italic,
+bold-italic, strikethrough, inline code and **links with their URLs intact**
+survive a write-then-read cycle unchanged, verified stable across three passes.
+
+What does not survive, because Notes has no way to express it through HTML:
+
+| Markdown | Becomes |
+|---|---|
+| `> quote` | plain text — block quotes are not encoded at all |
+| `- [ ]` / `- [x]` | a bullet prefixed `☐`/`☑`; real checklists cannot be created |
+| fenced code | monospaced lines, not a block |
+| `####` and deeper | clamped to `###` |
+
+### Writes are not immediately visible to reads
+
+**Notes.app holds changes in memory and writes them to `NoteStore.sqlite` on its
+own schedule.** Measured on macOS 15: a delete issued through Apple Events was
+still absent from the database 60 seconds later, and only landed when Notes.app
+quit. In between, the two disagreed in *both* directions — Notes.app no longer
+had the note, while the database still listed it as live.
+
+This is the single most important thing to know before building on this. A write
+is not observable through the read path for an unbounded period, so:
+
+- `notes new` prints the new note's UUID, but `notes show <uuid>` may not find
+  it yet, and `notes list` may keep showing a note you just deleted.
+- Anything that needs to confirm a write must poll for it. Read-after-write does
+  not work.
+- A file watcher on `NoteStore.sqlite` will not fire promptly after your own
+  write, so it cannot be used to confirm one — only to notice changes made on
+  other devices, once Notes gets around to persisting them.
+
+`append` is the one operation that reads a note's body through AppleScript in
+order to concatenate, **so it drops any hyperlink already in that note**. To add
+to a note that contains links, read it with `show`, edit, and `replace`.
 
 `show` takes the `ZIDENTIFIER` UUID that `list` prints. Notes in Recently
 Deleted are hidden unless you ask for them, by any of the three routes into the

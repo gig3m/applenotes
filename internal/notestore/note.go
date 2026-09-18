@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"unicode/utf16"
 )
 
@@ -69,6 +70,7 @@ type AttributeRun struct {
 	Length         int
 	ParagraphStyle *ParagraphStyle
 	FontName       string
+	PointSize      float32
 	FontWeight     int // a FontDefault/FontBold/... style enum, not a weight
 	Underlined     bool
 	Strikethrough  bool
@@ -190,8 +192,8 @@ func decodeRun(b []byte) (AttributeRun, error) {
 			}
 		case 3:
 			if f.typ == wireBytes {
-				if name, err := decodeFont(f.data); err == nil {
-					r.FontName = name
+				if name, size, err := decodeFont(f.data); err == nil {
+					r.FontName, r.PointSize = name, size
 				}
 			}
 		case 5:
@@ -286,17 +288,26 @@ func decodeChecklist(b []byte) (*Checklist, error) {
 	return c, err
 }
 
-// decodeFont returns the font name. font_hints is deliberately not read: Notes
-// does not populate it, and bold/italic live in AttributeRun.font_weight.
-func decodeFont(b []byte) (string, error) {
+// decodeFont returns the font name and point size. font_hints is deliberately
+// not read: Notes does not populate it, and bold/italic live in
+// AttributeRun.font_weight.
+func decodeFont(b []byte) (string, float32, error) {
 	var name string
+	var size float32
 	err := scan(b, func(f field) error {
-		if f.num == 1 && f.typ == wireBytes {
-			name = string(f.data)
+		switch f.num {
+		case 1:
+			if f.typ == wireBytes {
+				name = string(f.data)
+			}
+		case 2:
+			if f.typ == wireFixed32 {
+				size = math.Float32frombits(uint32(f.val))
+			}
 		}
 		return nil
 	})
-	return name, err
+	return name, size, err
 }
 
 func decodeAttachment(b []byte) (*AttachmentInfo, error) {

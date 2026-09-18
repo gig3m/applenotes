@@ -4,12 +4,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"text/tabwriter"
 
+	"github.com/gig3m/applenotes/internal/notesapp"
 	"github.com/gig3m/applenotes/internal/notestore"
 )
 
@@ -52,6 +55,26 @@ func main() {
 			fatalUsage("show needs exactly one note UUID")
 		}
 		err = show(*dbPath, fs.Arg(0))
+	case "new":
+		if fs.NArg() > 0 {
+			fatalUsage("new reads Markdown from stdin and takes no arguments")
+		}
+		err = newNote(*dbPath, *folder)
+	case "append":
+		if fs.NArg() != 1 {
+			fatalUsage("append needs exactly one note UUID")
+		}
+		err = appendNote(*dbPath, fs.Arg(0))
+	case "replace":
+		if fs.NArg() != 1 {
+			fatalUsage("replace needs exactly one note UUID")
+		}
+		err = replaceNote(*dbPath, fs.Arg(0))
+	case "rm":
+		if fs.NArg() != 1 {
+			fatalUsage("rm needs exactly one note UUID")
+		}
+		err = rmNote(*dbPath, fs.Arg(0))
 	case "decode":
 		if fs.NArg() > 0 {
 			fatalUsage("decode reads from stdin and takes no arguments")
@@ -83,6 +106,10 @@ commands:
   list [-folder NAME] [-deleted]   list notes, newest first
   folders                          list folders
   show <uuid>                      print one note as Markdown
+  new [-folder NAME]               create a note from Markdown on stdin
+  append <uuid>                    append Markdown from stdin to a note
+  replace <uuid>                   overwrite a note with Markdown from stdin
+  rm <uuid>                        move a note to Recently Deleted
   decode                           decode a raw ZICNOTEDATA blob on stdin
 
 common flags:
@@ -164,6 +191,97 @@ func show(path, uuid string) error {
 		return err
 	}
 	fmt.Println(body.Markdown())
+	return nil
+}
+
+// writer opens the store read-only and pairs it with the Apple Events writer.
+// Writes never go through SQLite: the database handle is read-only by
+// construction, and Notes.app owns its own file.
+func writer(path string) (*notestore.Store, *notesapp.Writer, error) {
+	s, err := open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s, notesapp.New(s), nil
+}
+
+func newNote(path, folder string) error {
+	md, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(md)) == 0 {
+		return fmt.Errorf("refusing to create an empty note")
+	}
+	s, w, err := writer(path)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	uuid, err := w.Create(context.Background(), folder, string(md))
+	if err != nil {
+		return err
+	}
+	fmt.Println(uuid)
+	warnLag()
+	return nil
+}
+
+// warnLag explains why a write may not show up in list or show yet.
+func warnLag() {
+	fmt.Fprintln(os.Stderr,
+		"notes: written. Notes.app persists changes to its database on its own\n"+
+			"       schedule, so this may not appear in list/show for a while.")
+}
+
+func appendNote(path, uuid string) error {
+	md, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return err
+	}
+	s, w, err := writer(path)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := w.Append(context.Background(), uuid, string(md)); err != nil {
+		return err
+	}
+	warnLag()
+	return nil
+}
+
+func replaceNote(path, uuid string) error {
+	md, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(md)) == 0 {
+		return fmt.Errorf("refusing to replace a note with an empty body")
+	}
+	s, w, err := writer(path)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := w.Replace(context.Background(), uuid, string(md)); err != nil {
+		return err
+	}
+	warnLag()
+	return nil
+}
+
+func rmNote(path, uuid string) error {
+	s, w, err := writer(path)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := w.Delete(context.Background(), uuid); err != nil {
+		return err
+	}
+	warnLag()
 	return nil
 }
 

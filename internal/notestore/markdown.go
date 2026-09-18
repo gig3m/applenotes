@@ -11,6 +11,10 @@ import (
 // objectReplacement occupies an attachment's slot in the note text.
 const objectReplacement = '￼'
 
+// headingMinSize is the smallest point size Notes uses for a heading created
+// through HTML; body text is 12pt.
+const headingMinSize = 16
+
 // span is a slice of the note text carrying resolved inline styling.
 type span struct {
 	text       string
@@ -78,6 +82,18 @@ func (n *Note) Markdown() string {
 				}
 			}
 		}
+		if style == StyleBody {
+			// Notes has no paragraph style for a heading created through HTML:
+			// it stores one as bold text at an enlarged point size. Recovering
+			// it here is what lets a heading survive a write-then-read cycle.
+			if h := ln.htmlHeading(); h != "" {
+				// The bold is what encodes the heading, so emitting it inline
+				// too would double-mark the line as "## **text**".
+				out = append(out, h+renderSpans(unbold(ln.spans), false))
+				continue
+			}
+		}
+
 		prefix := ""
 		switch style {
 		case StyleTitle:
@@ -111,6 +127,9 @@ func (n *Note) Markdown() string {
 		out = append(out, prefix+body)
 	}
 	closeMono()
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
 	return strings.Join(out, "\n")
 }
 
@@ -140,6 +159,28 @@ func (l line) style() int {
 		}
 	}
 	return StyleBody
+}
+
+// htmlHeading returns the Markdown prefix for a line Notes stored as enlarged
+// bold text, or "" if it is ordinary body text. Every run on the line must
+// agree, so a bolded phrase inside a paragraph is not mistaken for a heading.
+func (l line) htmlHeading() string {
+	size := float32(0)
+	for _, r := range l.runs {
+		if !r.Bold() || r.PointSize < headingMinSize {
+			return ""
+		}
+		if r.PointSize > size {
+			size = r.PointSize
+		}
+	}
+	switch {
+	case size >= 24:
+		return "# "
+	case size >= headingMinSize:
+		return "## "
+	}
+	return ""
 }
 
 func (l line) indent() int {
@@ -329,6 +370,17 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		b.WriteString(lead + core + trail)
 	}
 	return escapeLineStart(b.String())
+}
+
+// unbold clears the bold flag, for a line whose boldness is carrying its
+// heading level rather than emphasis.
+func unbold(spans []span) []span {
+	out := make([]span, len(spans))
+	copy(out, spans)
+	for i := range out {
+		out[i].bold = false
+	}
+	return out
 }
 
 // mergeSpans joins neighbouring spans that resolve to the same styling. Runs

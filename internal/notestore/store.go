@@ -280,3 +280,51 @@ func coreDataTime(v float64) time.Time {
 // ZIDENTIFIER UUID; the Core Data row id that AppleScript reports is local to
 // one machine and will not resolve on another device.
 func (n NoteMeta) DeepLink() string { return "applenotes:note/" + n.UUID }
+
+// StoreUUID is the Core Data persistent store identifier, the middle component
+// of the x-coredata:// ids AppleScript uses.
+func (s *Store) StoreUUID() (string, error) {
+	var u string
+	err := s.db.QueryRow(`SELECT Z_UUID FROM Z_METADATA`).Scan(&u)
+	if err != nil {
+		return "", fmt.Errorf("notestore: reading store uuid: %w", err)
+	}
+	return u, nil
+}
+
+// ScriptID converts a note's ZIDENTIFIER UUID into the x-coredata:// id that
+// Notes.app's AppleScript interface addresses notes by.
+//
+// The two identifier spaces are different and only one is portable: the UUID is
+// the CloudKit record name and is the same on every device, while the
+// x-coredata id embeds a row number local to this machine's database. Anything
+// stored or exchanged uses the UUID; the x-coredata form is derived here at the
+// moment it is handed to AppleScript.
+func (s *Store) ScriptID(uuid string) (string, error) {
+	store, err := s.StoreUUID()
+	if err != nil {
+		return "", err
+	}
+	var pk int64
+	err = s.db.QueryRow(
+		`SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT WHERE ZIDENTIFIER = ? ORDER BY Z_PK LIMIT 1`,
+		uuid).Scan(&pk)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("x-coredata://%s/ICNote/p%d", store, pk), nil
+}
+
+// UUIDForPK returns the portable UUID for a Core Data row id.
+func (s *Store) UUIDForPK(pk string) (string, error) {
+	var u string
+	err := s.db.QueryRow(
+		`SELECT ZIDENTIFIER FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = ?`, pk).Scan(&u)
+	if errors.Is(err, sql.ErrNoRows) || u == "" {
+		return "", ErrNotFound
+	}
+	return u, err
+}
