@@ -487,7 +487,7 @@ func TestParagraphStylePrefixes(t *testing.T) {
 		{"title", StyleTitle, "# text"},
 		{"heading", StyleHeading, "## text"},
 		{"subheading", StyleSubhead, "### text"},
-		{"dash list", StyleDashList, "- text"},
+		{"dash list", StyleDashList, "+ text"},
 		{"dot list", StyleDotList, "- text"},
 	} {
 		got := decode(t, blob("text", run(4, 0, tc.style, ""))).Markdown()

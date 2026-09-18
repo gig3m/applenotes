@@ -336,6 +336,26 @@ the most recent note's UUID, for an `on-click` that opens it.
 - [threeplanetssoftware/apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) — the reverse-engineered `notestore.proto` this decoder follows.
 - [BlueBubbles](https://bluebubbles.app) — the same bargain, for iMessage.
 
+## How Notes' formatting maps to Markdown
+
+Most of it is ordinary Markdown. Two things are not, because Notes has features
+Markdown does not:
+
+| Notes | Markdown |
+|---|---|
+| dotted list | `- item` (also `* item`) |
+| dashed list | `+ item` |
+| superscript / subscript | `<sup>2</sup>` / `<sub>2</sub>` |
+
+`+` carries the dash list because it is the bullet marker almost nobody writes
+by hand. `<sup>` and `<sub>` are passed through literally; every other tag is
+escaped, so a note whose text really contains `<b>` stays text.
+
+What a rewrite costs is reported per note, and the daemon returns it on every
+read as `degrades` (formatting flattened, no text lost) and `destroys`
+(content removed -- the write is refused unless forced). The full measured table
+of what Notes accepts is in `docs/review-context.md`.
+
 ## License
 
 MIT

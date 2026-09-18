@@ -118,12 +118,19 @@ func ToHTML(md string) string {
 				}
 				text = mark + c[2]
 			}
-			lists.item(listDepth(raw), "ul", inline(text))
+			// "+" carries Notes' dash list; "-" and "*" its dotted one. The
+			// class is what Notes keys on -- measured; nothing else produces a
+			// dash list through HTML.
+			kind := listKind{tag: "ul"}
+			if m[1] == "+" {
+				kind.class = "Apple-dash-list"
+			}
+			lists.item(listDepth(raw), kind, inline(text))
 			continue
 		}
 
 		if m := numberRe.FindStringSubmatch(trimmed); m != nil {
-			lists.item(listDepth(raw), "ol", inline(m[1]))
+			lists.item(listDepth(raw), listKind{tag: "ol"}, inline(m[1]))
 			continue
 		}
 
@@ -183,11 +190,21 @@ func inlineRaw(s string, atEnd bool) string {
 	var b strings.Builder
 	for {
 		code := findCodeSpan(s)
+		tag := findSupSub(s)
 		link := findLink(s)
+		// A code span wins ties: CommonMark gives backticks precedence, so
+		// <sup> or a link written inside them is literal text.
 		switch {
-		case code == nil && link == nil:
+		case code == nil && tag == nil && link == nil:
 			b.WriteString(emphasis(escapeFragment(s, atEnd)))
 			return b.String()
+		case tag != nil && (code == nil || tag[0] < code[0]) && (link == nil || tag[0] < link[0]):
+			b.WriteString(emphasis(escapeFragment(s[:tag[0]], false)))
+			name := s[tag[2]:tag[3]]
+			// The body is inlined in turn, so emphasis and links inside a
+			// superscript still convert.
+			b.WriteString("<" + name + ">" + inlineRaw(s[tag[4]:tag[5]], false) + "</" + name + ">")
+			s = s[tag[1]:]
 		case link == nil || (code != nil && code[0] < link[0]):
 			b.WriteString(emphasis(escapeFragment(s[:code[0]], false)))
 			body := s[code[1]:code[2]]
@@ -211,6 +228,31 @@ func inlineRaw(s string, atEnd bool) string {
 			s = rest
 		}
 	}
+}
+
+// supSubRe matches the inline HTML the renderer emits for a superscript or
+// subscript run. Only these two elements are passed through: everything else a
+// note contains that looks like a tag is escaped, and the renderer backslashes
+// any literal "<" it emits, so a note whose text really says "<sup>" cannot be
+// turned into a superscript by a round trip.
+var supSubRe = regexp.MustCompile(`(?s)<(sup|sub)>(.*?)</(sup|sub)>`)
+
+// findSupSub locates the next <sup> or <sub>, returning
+// [start, end, nameStart, nameEnd, bodyStart, bodyEnd].
+func findSupSub(s string) []int {
+	for at := 0; at < len(s); {
+		m := supSubRe.FindStringSubmatchIndex(s[at:])
+		if m == nil {
+			return nil
+		}
+		// FindStringSubmatchIndex cannot require the closing name to match the
+		// opening one, so mismatches like <sup>x</sub> are skipped as text.
+		if s[at+m[2]:at+m[3]] == s[at+m[6]:at+m[7]] {
+			return []int{at + m[0], at + m[1], at + m[2], at + m[3], at + m[4], at + m[5]}
+		}
+		at += m[1]
+	}
+	return nil
 }
 
 // findCodeSpan locates the next code span, returning the offsets of the opening
@@ -468,13 +510,29 @@ func emphasis(s string) string {
 // this keeps a stack instead of writing each item whole.
 type listWriter struct {
 	b     *strings.Builder
-	kinds []string // "ul" or "ol" for each open level
-	open  []bool   // whether an <li> is still open at that level
+	kinds []listKind // the list open at each level
+	open  []bool     // whether an <li> is still open at that level
 }
+
+// listKind is a list element and the class that distinguishes Notes' two
+// bullet styles. Comparable, so two levels can be checked for sameness.
+type listKind struct {
+	tag   string
+	class string
+}
+
+func (k listKind) openTag() string {
+	if k.class == "" {
+		return "<" + k.tag + ">"
+	}
+	return "<" + k.tag + " class=" + k.class + ">"
+}
+
+func (k listKind) closeTag() string { return "</" + k.tag + ">" }
 
 // item writes one list item at the given depth, opening and closing whatever
 // levels that implies.
-func (w *listWriter) item(depth int, kind, html string) {
+func (w *listWriter) item(depth int, kind listKind, html string) {
 	for len(w.kinds) > depth+1 {
 		w.closeLevel()
 	}
@@ -496,7 +554,7 @@ func (w *listWriter) item(depth int, kind, html string) {
 			w.b.WriteString("<li>")
 			w.open[n-1] = true
 		}
-		fmt.Fprintf(w.b, "<%s>", kind)
+		w.b.WriteString(kind.openTag())
 		w.kinds = append(w.kinds, kind)
 		w.open = append(w.open, false)
 	}
@@ -517,7 +575,7 @@ func (w *listWriter) closeLevel() {
 		w.b.WriteString("</li>")
 		w.open[d] = false
 	}
-	fmt.Fprintf(w.b, "</%s>", w.kinds[d])
+	w.b.WriteString(w.kinds[d].closeTag())
 	w.kinds = w.kinds[:d]
 	w.open = w.open[:d]
 	// The <li> hosting this list stays open: the next item at that level, or

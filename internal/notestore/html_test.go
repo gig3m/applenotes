@@ -484,3 +484,69 @@ func TestListDepthMatchesWhatMarkdownWrites(t *testing.T) {
 		}
 	}
 }
+
+// Markdown has no superscript or subscript, but Notes accepts <sup>/<sub>
+// through HTML -- measured, see docs/review-context.md -- so they round-trip as
+// inline HTML rather than being flattened and warned about.
+func TestSuperscriptAndSubscriptPassThrough(t *testing.T) {
+	for _, tc := range []struct{ md, want string }{
+		{"x<sup>2</sup>", "<div>x<sup>2</sup></div>"},
+		{"H<sub>2</sub>O", "<div>H<sub>2</sub>O</div>"},
+		{"a<sup>b</sup>c<sub>d</sub>", "<div>a<sup>b</sup>c<sub>d</sub></div>"},
+		// The body is inlined in turn, so emphasis inside still converts.
+		{"x<sup>**2**</sup>", "<div>x<sup><b>2</b></sup></div>"},
+	} {
+		if got := ToHTML(tc.md); got != tc.want {
+			t.Errorf("ToHTML(%q) = %s, want %s", tc.md, got, tc.want)
+		}
+	}
+}
+
+// Only those two elements pass through. A note whose text really contains a tag
+// must come back as that text, not as markup -- otherwise reading a note about
+// HTML and saving it silently rewrites the note.
+func TestOtherTagsAreStillEscaped(t *testing.T) {
+	for _, tc := range []struct{ md, want string }{
+		{"<script>alert(1)</script>", "&lt;script&gt;alert(1)&lt;/script&gt;"},
+		{"<b>not bold</b>", "&lt;b&gt;not bold&lt;/b&gt;"},
+		{"<sup>x</sub>", "&lt;sup&gt;x&lt;/sub&gt;"},         // mismatched: text, not markup
+		{`\<sup\>x\</sup\>`, "&#60;sup&#62;x&#60;/sup&#62;"}, // escaped by the reader
+	} {
+		got := ToHTML(tc.md)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("ToHTML(%q) = %s, want it to contain %s", tc.md, got, tc.want)
+		}
+	}
+}
+
+// A code span is literal, so a tag inside backticks is text.
+func TestSupInsideACodeSpanIsLiteral(t *testing.T) {
+	got := ToHTML("`<sup>x</sup>`")
+	if strings.Contains(got, "<sup>") {
+		t.Errorf("a tag inside backticks became markup: %s", got)
+	}
+}
+
+// Notes has two bullet styles and Markdown has three markers. "+" carries the
+// dash list because it is the marker almost nobody writes by hand; "-" and "*"
+// both mean the ordinary dotted list. Before this, a dashed list silently came
+// back dotted and nothing reported it -- a silent loss, which is worse than one
+// that warns.
+func TestDashListKeepsItsStyle(t *testing.T) {
+	for _, tc := range []struct{ md, want string }{
+		{"+ dashed", `<ul class=Apple-dash-list><li>dashed</li></ul>`},
+		{"- dotted", "<ul><li>dotted</li></ul>"},
+		{"* dotted", "<ul><li>dotted</li></ul>"},
+		{"+ dashed\n    + nested dash", `<ul class=Apple-dash-list><li>dashed<ul class=Apple-dash-list><li>nested dash</li></ul></li></ul>`},
+	} {
+		if got := ToHTML(tc.md); got != tc.want {
+			t.Errorf("ToHTML(%q) =\n  %s\nwant\n  %s", tc.md, got, tc.want)
+		}
+	}
+	// Switching style at the same depth starts a new list rather than
+	// continuing the old one with the wrong bullet.
+	got := ToHTML("- dotted\n+ dashed")
+	if !strings.Contains(got, "Apple-dash-list") || strings.Count(got, "<ul") != 2 {
+		t.Errorf("a style change did not start a new list: %s", got)
+	}
+}

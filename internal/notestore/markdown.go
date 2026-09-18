@@ -17,11 +17,15 @@ const headingMinSize = 16
 
 // span is a slice of the note text carrying resolved inline styling.
 type span struct {
-	text       string
-	bold       bool
-	italic     bool
-	strike     bool
-	mono       bool
+	text   string
+	bold   bool
+	italic bool
+	strike bool
+	mono   bool
+	// sup is +1 for superscript, -1 for subscript, 0 for neither. Markdown has
+	// no syntax for either, so they round-trip as inline HTML, which Notes does
+	// accept -- measured, see docs/review-context.md.
+	sup        int
 	link       string
 	attachment *AttachmentInfo
 }
@@ -102,8 +106,13 @@ func (n *Note) Markdown() string {
 			prefix = "## "
 		case StyleSubhead:
 			prefix = "### "
-		case StyleDotList, StyleDashList:
+		case StyleDotList:
 			prefix = "- "
+		case StyleDashList:
+			// Notes has two bullet styles and Markdown has three markers, so
+			// the rarer of each are paired off: "+" is almost never written by
+			// hand, which makes it the safer one to give a meaning to.
+			prefix = "+ "
 		case StyleNumList:
 			counters[indent]++
 			for d := range counters {
@@ -308,6 +317,7 @@ func spanFor(r *AttributeRun, text string) span {
 		italic:     r.Italic(),
 		strike:     r.Strikethrough,
 		mono:       isMonoFont(name),
+		sup:        r.Superscript,
 		link:       r.Link,
 		attachment: r.Attachment,
 	}
@@ -384,9 +394,25 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		} else if s.italic {
 			core = "*" + core + "*"
 		}
+		// Outermost, so the emphasis markers stay adjacent to the text and a
+		// reader without HTML still sees **x** rather than <sup>** x **</sup>.
+		if tag := supTag(s.sup); tag != "" {
+			core = "<" + tag + ">" + core + "</" + tag + ">"
+		}
 		b.WriteString(lead + core + trail)
 	}
 	return escapeLineStart(b.String())
+}
+
+// supTag names the HTML element for a superscript or subscript run.
+func supTag(sup int) string {
+	switch {
+	case sup > 0:
+		return "sup"
+	case sup < 0:
+		return "sub"
+	}
+	return ""
 }
 
 // unbold clears the bold flag, for a line whose boldness is carrying its
@@ -413,7 +439,7 @@ func mergeSpans(spans []span) []span {
 		if n := len(out); n > 0 && s.attachment == nil && out[n-1].attachment == nil &&
 			out[n-1].bold == s.bold && out[n-1].italic == s.italic &&
 			out[n-1].strike == s.strike && out[n-1].mono == s.mono &&
-			out[n-1].link == s.link {
+			out[n-1].sup == s.sup && out[n-1].link == s.link {
 			out[n-1].text += s.text
 			continue
 		}
@@ -666,9 +692,6 @@ func (n *Note) Degrades() []string {
 	add := adder(&out)
 	for i := range n.Runs {
 		r := &n.Runs[i]
-		if r.Superscript != 0 {
-			add("superscript or subscript")
-		}
 		ps := r.ParagraphStyle
 		if ps == nil {
 			continue

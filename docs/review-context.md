@@ -119,6 +119,21 @@ So the paragraph styles Notes will not accept from HTML at all are
 genuine round-trip losses, not conversion bugs. Everything above them in the
 table is the converter's job.
 
+### Paragraph alignment: deliberately not carried
+
+Notes accepts `text-align` and stores it, so alignment could survive a rewrite.
+It does not, on purpose.
+
+Markdown has no syntax for alignment, so carrying it would mean inventing some
+-- a marker the user sees in the editor, has to learn, and can break by typing
+near it -- for a feature almost no note uses. The judgement was that the cost to
+the format outweighs the loss, so alignment is reported by `Degrades` and
+flattened. If a note ever turns up that needs it, the write side is already
+proven; only a spelling has to be chosen.
+
+This is the only formatting Notes would accept that is knowingly dropped.
+Everything else `Degrades` reports is something Notes refuses on the way in.
+
 Two traps met while measuring:
 
 - Read the database **without** `immutable=1`. That flag skips the WAL, which is
