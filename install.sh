@@ -163,22 +163,38 @@ if [[ -z "$ok" ]]; then
 	exit 1
 fi
 
+ts="$(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/tailscale ip -4 2>/dev/null || true)"
+
 cat <<MSG
 
 install: notesd is running on $ADDR
 install: token is in $TOKEN
 
-To reach it from another machine, leave it on loopback and put Tailscale in
-front, which also gives you TLS:
+MSG
 
-  tailscale serve --bg ${ADDR##*:}
+if [[ -n "$ts" ]]; then
+	cat <<MSG
+This Mac is on a tailnet at $ts. To reach notesd from your other machines,
+bind that address -- only tailnet peers can route to it:
 
-then from the Linux side:
+  ADDR=$ts:${ADDR##*:} ./install.sh
 
-  export NOTESD_URL=https://$(hostname -s | tr "[:upper:]" "[:lower:]").\$TAILNET.ts.net
+then on the Linux side:
+
+  export NOTESD_URL=http://$ts:${ADDR##*:}
   export NOTESD_TOKEN=\$(ssh $(hostname -s | tr "[:upper:]" "[:lower:]") cat $TOKEN)
   notes list
 
+MSG
+else
+	cat <<MSG
+notesd is on loopback, so nothing else can reach it yet. Put it on a tailnet
+and re-run with ADDR set to this Mac's tailnet address.
+
+MSG
+fi
+
+cat <<'MSG'
 Keep Notes.app running: it persists changes on its own schedule, and a write
 is not visible to reads until it does.
 MSG

@@ -243,17 +243,21 @@ schedule, so claiming the change is durable would be a lie — and a read straig
 after a write may not show it. A rewrite that would destroy content answers
 **409** naming what would be lost; retry with `force` to overwrite anyway.
 
-It refuses to bind anything but loopback without `-listen-all`, and says what to
-do instead. The intended shape is to leave it on loopback and put Tailscale in
-front, which also gives you TLS:
+Bind the Mac's tailnet address. Only tailnet peers can route to it, so the
+WireGuard tunnel is the perimeter and nothing else on any network the Mac joins
+can see the port:
 
 ```
-tailscale serve --bg 8437
+notesd -listen-all -addr 100.x.y.z:8437
 ```
 
-`-listen-all` with a tailnet address binds that interface directly. `0.0.0.0`
-means every network the Mac ever joins, and the token is then the only thing in
-the way — the daemon says so in its log if you do it.
+`-listen-all` is required for any non-loopback address, so that binding
+`0.0.0.0` — every network the Mac ever joins, with the token as the only thing
+in the way — has to be deliberate. The daemon says so in its log if you do it.
+
+There is no TLS and it does not need `tailscale serve`: the tailnet is already
+an encrypted channel, and a proxy in front of it would only add a certificate
+you have no use for.
 
 ## From Linux
 
