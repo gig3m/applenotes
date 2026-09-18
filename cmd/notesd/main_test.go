@@ -22,9 +22,13 @@ func TestNonLoopbackRequiresOptIn(t *testing.T) {
 		{"localhost:8437", false, false},
 		{":8437", false, false},
 		{"0.0.0.0:8437", false, true},
-		{"100.64.0.1:8437", false, true},
+		// A tailnet address needs no opt-in: only tailnet peers can route to it.
+		{"100.64.0.1:8437", false, false},
+		{"100.96.91.16:8437", false, false},
+		{"100.128.0.1:8437", false, true}, // outside 100.64.0.0/10
+		{"192.168.1.5:8437", false, true},
 		{"0.0.0.0:8437", true, false},
-		{"100.64.0.1:8437", true, false},
+
 		{"garbage", false, true},
 	} {
 		err := checkAddr(tc.addr, tc.listenAll)
@@ -35,15 +39,35 @@ func TestNonLoopbackRequiresOptIn(t *testing.T) {
 }
 
 // The refusal must say what to do instead, not just decline.
-func TestRefusalSuggestsTailscaleServe(t *testing.T) {
+func TestRefusalSaysWhatToDoInstead(t *testing.T) {
 	err := checkAddr("0.0.0.0:9999", false)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
-	for _, want := range []string{"tailscale serve", "9999", "-listen-all"} {
+	for _, want := range []string{"tailnet", "-listen-all"} {
 		if !contains(err.Error(), want) {
 			t.Errorf("refusal does not mention %q: %v", want, err)
 		}
+	}
+}
+
+// With no -addr, the tailnet is preferred over loopback: the safe choice has to
+// be the default, not a flag people skip.
+func TestResolveAddrPrefersTheTailnet(t *testing.T) {
+	got, err := resolveAddr("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip, _ := tailnetIP()
+	want := "127.0.0.1:8437"
+	if ip != "" {
+		want = ip + ":8437"
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if explicit, _ := resolveAddr("1.2.3.4:1"); explicit != "1.2.3.4:1" {
+		t.Errorf("an explicit -addr was overridden: %q", explicit)
 	}
 }
 

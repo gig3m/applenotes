@@ -15,7 +15,9 @@ LABEL="dev.applenotes.notesd"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE="$HOME/.config/applenotes/installed"
 TOKEN="$HOME/.config/applenotes/token"
-ADDR="${ADDR:-127.0.0.1:8437}"
+# Empty by default: notesd resolves the tailnet interface itself, and falls
+# back to loopback. Set ADDR to override.
+ADDR="${ADDR:-}"
 BIN="$PREFIX/notesd"
 
 die() { echo "install: $*" >&2; exit 1; }
@@ -123,7 +125,7 @@ cat > "$PLIST" <<PLISTEOF
   <key>ProgramArguments</key>
   <array>
     <string>$BIN</string>
-    <string>-addr</string><string>$ADDR</string>
+${ADDR:+    <string>-addr</string><string>$ADDR</string>}
     <string>-token</string><string>$TOKEN</string>
   </array>
   <key>RunAtLoad</key><true/>
@@ -150,14 +152,18 @@ ok=""
 for _ in $(seq 1 20); do
 	sleep 0.5
 	[[ -s "$TOKEN" ]] || continue
+	# The daemon logs the address it chose; ask it where it landed.
+	listening="$(sed -n -e 's/.*binding the tailnet address //p' -e 's/.*binding loopback.*/127.0.0.1/p' \
+		"$HOME/Library/Logs/notesd.log" 2>/dev/null | tail -1)"
+	[[ -n "$listening" ]] || listening="127.0.0.1"
 	if curl -fsS -m 3 -H "Authorization: Bearer $(cat "$TOKEN")" \
-		"http://${ADDR}/v1/healthz" >/dev/null 2>&1; then
+		"http://${listening}:8437/v1/healthz" >/dev/null 2>&1; then
 		ok=yes
 		break
 	fi
 done
 if [[ -z "$ok" ]]; then
-	echo "install: the agent did not answer on $ADDR within 10s" >&2
+	echo "install: the agent did not answer within 10s" >&2
 	echo "install: see $HOME/Library/Logs/notesd.log" >&2
 	echo "install: run ./uninstall.sh to undo this" >&2
 	exit 1
@@ -167,21 +173,17 @@ ts="$(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/
 
 cat <<MSG
 
-install: notesd is running on $ADDR
+install: notesd is running on ${listening}:8437
 install: token is in $TOKEN
 
 MSG
 
 if [[ -n "$ts" ]]; then
 	cat <<MSG
-This Mac is on a tailnet at $ts. To reach notesd from your other machines,
-bind that address -- only tailnet peers can route to it:
+This Mac is on a tailnet at $ts, which is where notesd bound itself. From the
+Linux side:
 
-  ADDR=$ts:${ADDR##*:} ./install.sh
-
-then on the Linux side:
-
-  export NOTESD_URL=http://$ts:${ADDR##*:}
+  export NOTESD_URL=http://$ts:8437
   export NOTESD_TOKEN=\$(ssh $(hostname -s | tr "[:upper:]" "[:lower:]") cat $TOKEN)
   notes list
 

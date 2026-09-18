@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,7 +29,7 @@ import (
 
 func main() {
 	var (
-		addr      = flag.String("addr", "127.0.0.1:8437", "address to listen on")
+		addr      = flag.String("addr", "", "address to listen on (default: the tailnet interface, else loopback)")
 		dbPath    = flag.String("db", "", "path to NoteStore.sqlite (default: the current user's)")
 		tokenPath = flag.String("token", defaultTokenPath(), "file holding the bearer token; created if absent")
 		listenAll = flag.Bool("listen-all", false, "permit binding to an address other than loopback (see -h)")
@@ -36,7 +37,11 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	if err := run(*addr, *dbPath, *tokenPath, *listenAll); err != nil {
+	resolved, err := resolveAddr(*addr)
+	if err != nil {
+		log.Fatalln("notesd:", err)
+	}
+	if err := run(resolved, *dbPath, *tokenPath, *listenAll); err != nil {
 		log.Fatalln("notesd:", err)
 	}
 }
@@ -47,21 +52,61 @@ func usage() {
 Serves this Mac's Apple Notes over HTTP. The bearer token is the only
 perimeter, so where it listens matters.
 
-Reaching it from another machine, in order of preference:
+By default it binds this Mac's tailnet address if there is one, and loopback
+otherwise. Only tailnet peers can route to a 100.x address, so the WireGuard
+tunnel is the perimeter and nothing on whatever network the Mac joins next can
+see the port.
 
-  tailscale serve --bg 8437      notesd stays on loopback; Tailscale terminates
-                                 TLS and only tailnet peers can reach it.
-
-  -addr <tailscale-ip>:8437      bind the tailnet interface directly. Requires
-                                 -listen-all. Reachable only over the tailnet.
-
-  -addr 0.0.0.0:8437             every interface, including whatever Wi-Fi this
-                                 Mac joins next. Requires -listen-all, and you
-                                 should not want this.
+  -addr 0.0.0.0:8437   every interface, including that next network. Requires
+                       -listen-all, and you should not want it.
 
 flags:
 `)
 	flag.PrintDefaults()
+}
+
+// tailnetRange is Tailscale's slice of the carrier-grade NAT space.
+var tailnetRange = netip.MustParsePrefix("100.64.0.0/10")
+
+// resolveAddr picks the interface to bind when none was given: the tailnet if
+// this Mac is on one, loopback otherwise. Defaulting to the tailnet is what
+// makes the safe choice the easy one -- the alternative is a flag people skip.
+func resolveAddr(addr string) (string, error) {
+	if addr != "" {
+		return addr, nil
+	}
+	ip, err := tailnetIP()
+	if err != nil {
+		return "", err
+	}
+	if ip == "" {
+		log.Print("notesd: no tailnet address found; binding loopback only")
+		return "127.0.0.1:8437", nil
+	}
+	log.Printf("notesd: binding the tailnet address %s", ip)
+	return net.JoinHostPort(ip, "8437"), nil
+}
+
+func tailnetIP() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, a := range addrs {
+		prefix, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(prefix.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if ip.Is4() && tailnetRange.Contains(ip) {
+			return ip.String(), nil
+		}
+	}
+	return "", nil
 }
 
 func run(addr, dbPath, tokenPath string, listenAll bool) error {
@@ -131,23 +176,21 @@ func checkAddr(addr string, listenAll bool) error {
 	case "127.0.0.1", "::1", "localhost", "":
 		return nil
 	}
+	// A tailnet address is reachable only by tailnet peers, so it needs no more
+	// ceremony than loopback.
+	if ip, err := netip.ParseAddr(host); err == nil && tailnetRange.Contains(ip.Unmap()) {
+		return nil
+	}
 	if !listenAll {
 		return fmt.Errorf("refusing to listen on %s without -listen-all.\n"+
-			"       Prefer leaving notesd on loopback and running:  tailscale serve --bg %s\n"+
-			"       See -h for why", host, portOf(addr))
+			"       With no -addr at all, notesd binds this Mac's tailnet address,\n"+
+			"       which is reachable only by tailnet peers. See -h for why", host)
 	}
 	if host == "0.0.0.0" || host == "::" {
 		log.Printf("notesd: listening on %s -- every interface, including whatever network "+
 			"this Mac joins next. The token is the only thing in the way.", host)
 	}
 	return nil
-}
-
-func portOf(addr string) string {
-	if _, port, err := net.SplitHostPort(addr); err == nil {
-		return port
-	}
-	return "8437"
 }
 
 func defaultTokenPath() string {
