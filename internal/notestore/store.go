@@ -99,8 +99,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One connection: each would map its own -shm, and nothing here benefits
-	// from concurrency.
+	// One connection, kept for the life of the Store: nothing here benefits from
+	// concurrency, and a long-lived handle avoids re-mapping the -shm on every
+	// poll. Note this makes the handle unusable for anything that holds a Tx or
+	// open Rows while issuing a second query -- that would deadlock in the pool.
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -179,7 +181,10 @@ func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
 		q += ` AND (f.ZTITLE2 = ? OR f.ZIDENTIFIER = ?)`
 		args = append(args, opt.Folder, opt.Folder)
 	}
-	q += ` ORDER BY COALESCE(n.ZMODIFICATIONDATE1, n.ZMODIFICATIONDATE, 0) DESC, n.Z_PK DESC`
+	// NULLIF, not bare COALESCE: SQL COALESCE stops at the first non-NULL
+	// including a stored 0, while firstTime treats 0 as absent. Without this
+	// the two disagree and a note displays as newest while sorting last.
+	q += ` ORDER BY COALESCE(NULLIF(n.ZMODIFICATIONDATE1, 0), NULLIF(n.ZMODIFICATIONDATE, 0), 0) DESC, n.Z_PK DESC`
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {

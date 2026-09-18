@@ -2,6 +2,7 @@ package notestore
 
 import (
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,9 @@ func newTestDB(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "NoteStore.sqlite")
 	// WAL, matching the real database -- read-only access to a WAL database is
 	// the thing most likely to break.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	dsn := (&url.URL{Scheme: "file", Path: path,
+		RawQuery: url.Values{"_pragma": {"journal_mode(WAL)"}}.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +45,8 @@ func newTestDB(t *testing.T) string {
 		(1, 'DefaultFolder-CloudKit', 'Notes'),
 		(2, 'TrashFolder-CloudKit', 'Recently Deleted'),
 		(3, 'FOLDER-UUID-3', 'Southside')`)
+	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2, ZMARKEDFORDELETION)
+		VALUES (4, 'FOLDER-UUID-4', 'Gone', 1)`)
 
 	// 100: normal. 101: in Southside. 102: flagged deleted. 103: in the trash
 	// folder but not flagged. 104: password-protected.
@@ -62,12 +67,14 @@ func newTestDB(t *testing.T) string {
 		(106, 'UUID-G', NULL,      1,    206, 100000, NULL, 40000,  NULL),
 		(107, 'UUID-H', 'Hotel',   1,    303, 100000, NULL, 30000,  NULL),
 		(108, 'UUID-I', 'India',   1,    207, 100000, NULL, NULL,   900000),
-		(109, 'UUID-J', 'Juliet',  1,    208, 0,      77000, 20000, NULL)`)
+		(109, 'UUID-J', 'Juliet',  1,    208, 0,      77000, 20000, NULL),
+		(110, 'UUID-K', 'Kilo',    4,    209, 100000, NULL,  10000, NULL),
+		(111, 'UUID-L', 'Lima',    1,    210, 100000, NULL,  0,     990000)`)
 
 	body := blob("Alpha\nlinked", run(6, 0, -2, ""), run(6, 0, -2, "https://x.test/a"))
 	stmt := `INSERT INTO ZICNOTEDATA (Z_PK, ZNOTE, ZDATA) VALUES (?, ?, ?)`
 	// Note 107 deliberately gets no row here.
-	for i, pk := range []int{100, 101, 102, 103, 104, 105, 106, 108, 109} {
+	for i, pk := range []int{100, 101, 102, 103, 104, 105, 106, 108, 109, 110, 111} {
 		if _, err := db.Exec(stmt, 200+i, pk, body); err != nil {
 			t.Fatal(err)
 		}
@@ -97,17 +104,23 @@ func TestFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d folders, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("got %d folders, want 4", len(got))
 	}
-	var trash int
+	var trash, deleted int
 	for _, f := range got {
 		if f.Trash() {
 			trash++
 		}
+		if f.Deleted {
+			deleted++
+		}
 	}
 	if trash != 1 {
 		t.Errorf("got %d trash folders, want 1", trash)
+	}
+	if deleted != 1 {
+		t.Errorf("got %d folders marked deleted, want 1", deleted)
 	}
 }
 
@@ -125,8 +138,14 @@ func TestNotesExcludesTrashByDefault(t *testing.T) {
 	}
 	// Alpha, Bravo, Echo, Foxtrot, India, Juliet and the untitled one; Hotel is
 	// excluded for having no body row, Charlie and Delta are in the trash.
-	if len(visible) != 7 {
-		t.Fatalf("got %d notes %v, want 7", len(visible), titles)
+	// Kilo is excluded too: its folder is marked for deletion.
+	if len(visible) != 8 {
+		t.Fatalf("got %d notes %v, want 8", len(visible), titles)
+	}
+	for _, n := range visible {
+		if n.Title == "Kilo" {
+			t.Error("a note in a deleted folder should not be listed")
+		}
 	}
 	for _, n := range visible {
 		if n.Title == "Hotel" {
@@ -138,8 +157,8 @@ func TestNotesExcludesTrashByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 9 {
-		t.Errorf("got %d with deleted, want 9", len(all))
+	if len(all) != 11 {
+		t.Errorf("got %d with deleted, want 11", len(all))
 	}
 }
 
@@ -151,8 +170,11 @@ func TestNotesOrderMatchesDisplayedTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[0].Title != "India" {
-		t.Errorf("newest is %q, want India", got[0].Title)
+	// Lima's ZMODIFICATIONDATE1 is a stored 0 with the real date in the
+	// fallback column, so SQL COALESCE and firstTime must agree that 0 means
+	// absent -- otherwise it displays as newest and sorts last.
+	if got[0].Title != "Lima" {
+		t.Errorf("newest is %q, want Lima", got[0].Title)
 	}
 	for i := 1; i < len(got); i++ {
 		if got[i].Modified.After(got[i-1].Modified) {
@@ -220,7 +242,7 @@ func TestTrashedCoversBothRoutes(t *testing.T) {
 			seen[n.Title] = true
 		}
 	}
-	for _, want := range []string{"Charlie", "Delta"} {
+	for _, want := range []string{"Charlie", "Delta", "Kilo"} {
 		if !seen[want] {
 			t.Errorf("%s not reported as trashed", want)
 		}

@@ -15,7 +15,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -24,14 +24,14 @@ func main() {
 	// package stops at the first non-flag argument, so a global FlagSet would
 	// silently ignore everything after the command name.
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	fs.Usage = usage
+	fs.Usage = func() { fmt.Fprint(os.Stdout, usageText) } // -h is not an error
+	fs.SetOutput(os.Stderr)
 	dbPath := fs.String("db", "", "path to NoteStore.sqlite (default: the current user's)")
-	var folder *string
-	var deleted *bool
-	if cmd == "list" {
-		folder = fs.String("folder", "", "limit to a folder, by name or UUID")
-		deleted = fs.Bool("deleted", false, "include notes in Recently Deleted")
-	}
+	// Registered for every subcommand rather than only for list. Gating the
+	// allocation on the command name leaves nil pointers that the next alias or
+	// refactor dereferences.
+	folder := fs.String("folder", "", "list: limit to a folder, by name or UUID")
+	deleted := fs.Bool("deleted", false, "list: include notes in Recently Deleted")
 	// fs uses ExitOnError, so Parse never returns on failure.
 	fs.Parse(os.Args[2:])
 
@@ -53,6 +53,9 @@ func main() {
 		}
 		err = show(*dbPath, fs.Arg(0))
 	case "decode":
+		if fs.NArg() > 0 {
+			fatalUsage("decode reads from stdin and takes no arguments")
+		}
 		err = decode(os.Stdin)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usageText)
@@ -73,8 +76,6 @@ func fatalUsage(format string, args ...any) {
 	fmt.Fprint(os.Stderr, usageText)
 	os.Exit(2)
 }
-
-func usage() { fmt.Fprint(os.Stderr, usageText) }
 
 const usageText = `usage: notes <command> [flags]
 

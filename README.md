@@ -53,7 +53,8 @@ rather than trusting what AppleScript read back.
 - `<h1>`/`<h2>` are lowered to bold 24px/18px spans on write.
 - Adjacent `<ul>` and `<ol>` merge into one list. Separate them with a
   `<div><br></div>`.
-- Locked notes are invisible to this, by design.
+- Locked (password-protected) notes are listed with their metadata, but
+  their bodies are encrypted and are not readable here.
 
 ## Security
 
@@ -92,9 +93,10 @@ notes decode                           decode a raw ZICNOTEDATA blob on stdin
 ```
 
 `show` takes the `ZIDENTIFIER` UUID that `list` prints. Notes in Recently
-Deleted are hidden unless you ask for them, by either route into the trash --
-the deletion flag, or simply living in that folder. Password-protected notes
-are listed and flagged but their bodies are not readable.
+Deleted are hidden unless you ask for them, by any of the three routes into the
+trash: the note's own deletion flag, living in the trash folder, or sitting in
+a folder that is itself marked for deletion. Password-protected notes are
+listed and flagged but their bodies are not readable.
 
 `-folder` matches by name or UUID and does not descend into subfolders.
 
@@ -103,9 +105,9 @@ this tool modifies a note, the database, or iCloud. One caveat, because SQLite
 requires it: opening a WAL-mode database creates its `-shm` and `-wal` sidecar
 files if they are absent. Against a live Notes database both already exist and
 nothing is created. Against a *copy*, SQLite will create empty sidecars next to
-it — so copy `NoteStore.sqlite-wal` and `-shm` along with the database, or you
-will also be reading a stale snapshot that is missing everything Notes has not
-yet checkpointed.
+it — so copy `NoteStore.sqlite-wal` alongside the database, or you will also be
+reading a stale snapshot missing everything Notes has not yet checkpointed.
+(`-shm` need not be copied; SQLite rebuilds it from the `-wal`.)
 
 ## Prior art
 
