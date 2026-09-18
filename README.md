@@ -184,6 +184,30 @@ it — so copy `NoteStore.sqlite-wal` alongside the database, or you will also b
 reading a stale snapshot missing everything Notes has not yet checkpointed.
 (`-shm` need not be copied; SQLite rebuilds it from the `-wal`.)
 
+## Installing
+
+On the bridge Mac, with SIP already disabled:
+
+```
+./install.sh
+```
+
+It puts a prebuilt `./notesd` beside the script into `/usr/local/bin`, grants it
+Full Disk Access and Automation over Notes.app by writing TCC directly, and
+loads a LaunchAgent. It refuses to run with SIP enabled and tells you what your
+options are. `./uninstall.sh` reverses all of it.
+
+A LaunchAgent, not a LaunchDaemon: Apple Events must come from a logged-in GUI
+session, so the daemon runs as you and only while you are logged in. Keep
+Notes.app running — it persists changes on its own schedule.
+
+If the Mac has no Go toolchain, which is likely for a machine kept for this
+purpose, build the binary elsewhere and put it beside the script:
+
+```
+GOOS=darwin GOARCH=amd64 go build -o notesd ./cmd/notesd
+```
+
 ## notesd
 
 ```
