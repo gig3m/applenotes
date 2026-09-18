@@ -12,7 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        # 'stable', not a pinned minor: the standard library is where
+        # govulncheck findings land, and they are fixed by patch releases.
+        with: { go-version: 'stable' }
 
       # The bridge Mac is usually an old machine kept for the purpose and will
       # not have a Go toolchain, so install.sh takes a prebuilt binary beside

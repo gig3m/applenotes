@@ -9,7 +9,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        # 'stable', not a pinned minor: the standard library is where
+        # govulncheck findings land, and they are fixed by patch releases.
+        with: { go-version: 'stable' }
       - run: go vet ./...
       - run: go test -race ./...
       - run: go test -run=XXX -fuzz=FuzzDecode -fuzztime=60s ./internal/notestore
@@ -37,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        # 'stable', not a pinned minor: the standard library is where
+        # govulncheck findings land, and they are fixed by patch releases.
+        with: { go-version: 'stable' }
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
 
@@ -49,6 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        # 'stable', not a pinned minor: the standard library is where
+        # govulncheck findings land, and they are fixed by patch releases.
+        with: { go-version: 'stable' }
       # Cross-compiled for the bridge Mac, which will not have a Go toolchain.
       - run: GOOS=darwin GOARCH=${{ matrix.arch }} go build ./...
