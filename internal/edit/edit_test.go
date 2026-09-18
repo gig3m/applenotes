@@ -162,8 +162,56 @@ func TestRefusedWriteKeepsTheBuffer(t *testing.T) {
 	os.Remove(path)
 }
 
-// A GUI editor launched detached returns before the user has typed anything.
-// Reporting "no changes" is true and useless: the editor is still open and the
-// edit is about to be lost.
-
-// A genuine no-op edit, where the editor did wait, is still silent.
+// Every path that gives up must either remove the buffer or name it. The one
+// that did neither lost the user's edit to a file they had no way to find --
+// in the package whose stated position is that losing their writing is the
+// worse mistake.
+func TestAFailedEditAlwaysSaysWhereTheBufferIs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(path string) error
+	}{
+		{"the editor exits non-zero", func(path string) error {
+			os.WriteFile(path, []byte("work the user saved before it died"), 0o600)
+			return errors.New("killed")
+		}},
+		{"the buffer cannot be read back", func(path string) error {
+			return os.Chmod(path, 0o000)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &fakeStore{body: "hello"}
+			ed := &Editor{Store: s, Run: tc.run}
+			wrote, err := ed.Edit(context.Background(), "UUID")
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if wrote {
+				t.Error("reported a write")
+			}
+			if len(s.written) != 0 {
+				t.Errorf("wrote %q", s.written)
+			}
+			// Naming the path is not enough on its own -- a bare OS error
+			// mentions it too, while leaving the user to guess whether their
+			// work survived. The message has to say the buffer was kept.
+			if !strings.Contains(err.Error(), "kept in") {
+				t.Errorf("the error does not say the buffer was kept: %v", err)
+			}
+			var named string
+			for _, f := range strings.Fields(err.Error()) {
+				if strings.Contains(f, "note-") && strings.Contains(f, ".md") {
+					named = strings.Trim(f, "():,")
+				}
+			}
+			if named == "" {
+				t.Fatalf("the error does not name the buffer: %v", err)
+			}
+			os.Chmod(named, 0o600)
+			if _, statErr := os.Stat(named); statErr != nil {
+				t.Errorf("named %s but it is not there: %v", named, statErr)
+			}
+			os.Remove(named)
+		})
+	}
+}

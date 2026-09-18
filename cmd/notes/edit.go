@@ -56,6 +56,7 @@ func editNote(stderr io.Writer, dbPath, server, token, uuid string, force bool) 
 	ed := &edit.Editor{
 		Force:     force,
 		OnDegrade: func(f []string) { warnDegraded(stderr, f) },
+		Run:       edit.Runner(stderr),
 	}
 	if server != "" {
 		c, err := remoteClient(server, token)

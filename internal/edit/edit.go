@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,17 +72,19 @@ func (e *Editor) Edit(ctx context.Context, uuid string) (wrote bool, err error) 
 
 	run := e.Run
 	if run == nil {
-		run = runEditor
+		run = Runner(os.Stderr)
 	}
 	if err := run(path); err != nil {
-		// A crashed editor must not be read as "the user emptied the note".
-		os.Remove(path)
-		return false, fmt.Errorf("editor: %w", err)
+		// Nothing is written -- a crashed editor must not be read as "the user
+		// emptied the note" -- but the buffer is kept and named. The user may
+		// have saved before it died, and this package's whole argument is that
+		// losing their writing is the worse mistake.
+		return false, fmt.Errorf("editor (your buffer is kept in %s): %w", path, err)
 	}
 
 	edited, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("reading back your edit (it is kept in %s): %w", path, err)
 	}
 	if string(edited) == body {
 		os.Remove(path)
@@ -117,75 +120,154 @@ func (e *Editor) Edit(ctx context.Context, uuid string) (wrote bool, err error) 
 // The chosen command is returned along with a note to show the user, empty when
 // the choice needs no explanation.
 func editorFor(env func(string) string, look func(string) (string, error)) (argv []string, note string, err error) {
-	// NOTES_EDITOR is the escape hatch: set it for this tool alone, without
-	// touching $EDITOR for everything else.
+	var tried []string
 	for _, key := range []string{"NOTES_EDITOR", "VISUAL", "EDITOR"} {
 		ed := strings.TrimSpace(env(key))
 		if ed == "" {
 			continue
 		}
-		parts := strings.Fields(ed)
-		if key == "NOTES_EDITOR" || blocks(parts) {
+		parts := splitEditor(ed, look)
+		if len(parts) == 0 {
+			// Deliberately redundant with the TrimSpace above: an empty argv
+			// reaches exec as argv[0] on a zero-length slice, which panics.
+			// Neither check alone is load-bearing; do not remove either.
+			continue
+		}
+		// NOTES_EDITOR is the escape hatch: set it for this tool alone, without
+		// touching $EDITOR for everything else. It is obeyed exactly.
+		if key == "NOTES_EDITOR" {
 			return parts, "", nil
 		}
-		// Configured, but it will not wait. Fall back rather than lose the edit.
-		if term := firstOnPath(look); term != "" {
-			// Deliberately not suggesting a wait flag for their command: it may
-			// not have one, and advice that does not work is worse than none.
-			return []string{term}, fmt.Sprintf(
-				"$%s is %q, which does not wait for you to finish, so this edit uses %s instead.\n"+
-					"       Set NOTES_EDITOR to choose for yourself, for example\n"+
-					"         NOTES_EDITOR=nvim   NOTES_EDITOR='code -w'   NOTES_EDITOR='zed --wait'",
-				key, ed, term), nil
+		if blocks(parts) {
+			return parts, "", nil
 		}
-		return nil, "", fmt.Errorf(
-			"$%s is %q, which returns before you have finished editing, and no terminal\n"+
-				"       editor was found to use instead. Set one: NOTES_EDITOR=nano", key, ed)
+		// Keep looking rather than giving up here. VISUAL naming a GUI editor
+		// and EDITOR naming a terminal one is the convention these variables
+		// exist for, so a launcher in VISUAL must not hide a usable EDITOR.
+		tried = append(tried, fmt.Sprintf("$%s (%s)", key, ed))
 	}
+
 	if term := firstOnPath(look); term != "" {
-		return []string{term}, "", nil
+		if len(tried) == 0 {
+			return []string{term}, "", nil
+		}
+		// Carefully not "does not wait": for an unrecognised command that is a
+		// guess, and several editors that do wait land here. Nor is a wait flag
+		// suggested for their command, since it may not have one.
+		return []string{term}, fmt.Sprintf(
+			"cannot confirm %s waits for you to finish, so this edit uses %s instead.\n"+
+				"       Set NOTES_EDITOR to choose for yourself, for example\n"+
+				"         NOTES_EDITOR=nvim   NOTES_EDITOR='code -w'   NOTES_EDITOR='zed --wait'",
+			strings.Join(tried, " or "), term), nil
+	}
+	if len(tried) > 0 {
+		return nil, "", fmt.Errorf(
+			"cannot confirm %s waits for you to finish, and no terminal editor was\n"+
+				"       found to use instead. Set one: NOTES_EDITOR=nano", strings.Join(tried, " or "))
 	}
 	return nil, "", fmt.Errorf("no editor found; set NOTES_EDITOR (for example NOTES_EDITOR=nano)")
 }
 
-// terminalEditors are tried in order when nothing usable is configured.
-var terminalEditors = []string{"nvim", "vim", "helix", "hx", "kak", "micro", "nano", "vis", "vi"}
+// splitEditor turns a setting into argv. A bare path is not split, so an editor
+// living under a directory with a space in it can still be named; anything else
+// is split on spaces so "code -w" works.
+func splitEditor(ed string, look func(string) (string, error)) []string {
+	if _, err := look(ed); err == nil {
+		return []string{ed}
+	}
+	return strings.Fields(ed)
+}
 
-// blocks reports whether a command waits for the editor to be closed. Either it
-// is an editor that runs inside this terminal, or it is a GUI editor carrying
-// the flag that makes it wait.
+// fallbackOrder is what to reach for when nothing usable is configured, best
+// first. ed is last and is genuinely unpleasant, but it is present on every
+// unix and beats refusing to edit at all.
+var fallbackOrder = []string{"nvim", "vim", "helix", "hx", "kak", "micro", "nano", "vis", "vi", "ed"}
+
+// terminalEditors run inside the terminal they are started from, so the command
+// does not return until the user is finished.
+var terminalEditors = map[string]bool{
+	"nano": true, "pico": true, "micro": true, "helix": true, "hx": true,
+	"kak": true, "vis": true, "ed": true, "joe": true, "jed": true,
+	"mg": true, "ne": true, "mcedit": true, "jmacs": true, "zile": true,
+	"dte": true, "tilde": true, "nvi": true,
+}
+
+// vimFamily needs its own rule: -w and -W here mean "record keystrokes to this
+// file" and take an argument, so the generic wait-flag test would read a vim
+// script log as a promise to wait.
+var vimFamily = map[string]bool{
+	"vi": true, "vim": true, "nvim": true, "view": true, "vimdiff": true,
+	"ex": true, "gvim": true, "mvim": true, "gview": true, "evim": true,
+}
+
+// guiVim forks into a window unless given -f/--nofork. "vim -g" is the same
+// program by another name.
+var guiVim = map[string]bool{"gvim": true, "mvim": true, "gview": true, "evim": true}
+
+// blocks reports whether a command waits for the user to finish editing.
 func blocks(argv []string) bool {
 	if len(argv) == 0 {
 		return false
 	}
-	name := filepath.Base(argv[0])
-	for _, flag := range argv[1:] {
-		switch flag {
-		case "-w", "--wait", "-W", "--block":
-			return true
+	name := editorName(argv[0])
+	flags := argv[1:]
+	switch {
+	case vimFamily[name]:
+		if guiVim[name] || hasFlag(flags, "-g") {
+			return hasFlag(flags, "-f", "--nofork")
+		}
+		return true
+	case name == "emacs":
+		// emacs opens a window unless held in the terminal.
+		return hasFlag(flags, "-nw", "-t", "--tty", "-tty")
+	case name == "emacsclient":
+		// The opposite of emacs: emacsclient waits for C-x # unless told not
+		// to. -c and -t choose the frame, not whether it waits.
+		return !hasFlag(flags, "-n", "--no-wait")
+	case name == "kate" || name == "kwrite":
+		return hasFlag(flags, "-b", "--block")
+	case terminalEditors[name]:
+		return true
+	default:
+		// An unrecognised command carrying a wait flag is taken at its word;
+		// otherwise assume it is a launcher. Guessing wrong that way costs a
+		// line of explanation, and guessing wrong the other way costs the
+		// user's writing.
+		return hasFlag(flags, "-w", "--wait", "--block")
+	}
+}
+
+// editorName reduces a command to the name the rules are written against:
+// case-insensitive, without its directory, and without the suffix Debian's
+// alternatives put on vim.tiny and friends.
+func editorName(cmd string) string {
+	n := strings.ToLower(filepath.Base(cmd))
+	if i := strings.IndexByte(n, '.'); i > 0 {
+		if base := n[:i]; vimFamily[base] || terminalEditors[base] {
+			return base
 		}
 	}
-	// emacs and emacsclient open a window unless told to stay in the terminal.
-	if name == "emacs" || name == "emacsclient" {
-		for _, flag := range argv[1:] {
-			if flag == "-nw" || flag == "-t" || flag == "--tty" || flag == "-tty" {
+	return n
+}
+
+// hasFlag reports whether any of want appears, accepting the --flag=value form
+// for the long ones.
+func hasFlag(flags []string, want ...string) bool {
+	for _, f := range flags {
+		for _, w := range want {
+			if f == w {
+				return true
+			}
+			if strings.HasPrefix(w, "--") && strings.HasPrefix(f, w+"=") {
 				return true
 			}
 		}
-		return false
 	}
-	for _, t := range terminalEditors {
-		if name == t {
-			return true
-		}
-	}
-	// Unknown: assume it is a launcher. Guessing wrong the other way silently
-	// discards what the user typed, which is the worse of the two mistakes.
 	return false
 }
 
 func firstOnPath(look func(string) (string, error)) string {
-	for _, ed := range terminalEditors {
+	for _, ed := range fallbackOrder {
 		if _, err := look(ed); err == nil {
 			return ed
 		}
@@ -193,15 +275,19 @@ func firstOnPath(look func(string) (string, error)) string {
 	return ""
 }
 
-func runEditor(path string) error {
-	argv, note, err := editorFor(os.Getenv, exec.LookPath)
-	if err != nil {
-		return err
+// Runner returns the default Run for an Editor, reporting its choice of editor
+// to stderr rather than to os.Stderr directly, so the command owns its output.
+func Runner(stderr io.Writer) func(path string) error {
+	return func(path string) error {
+		argv, note, err := editorFor(os.Getenv, exec.LookPath)
+		if err != nil {
+			return err
+		}
+		if note != "" {
+			fmt.Fprintln(stderr, "notes: "+note)
+		}
+		cmd := exec.Command(argv[0], append(argv[1:], path)...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return cmd.Run()
 	}
-	if note != "" {
-		fmt.Fprintln(os.Stderr, "notes: "+note)
-	}
-	cmd := exec.Command(argv[0], append(argv[1:], path)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
 }
