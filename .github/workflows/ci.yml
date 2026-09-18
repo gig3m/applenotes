@@ -1,0 +1,29 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    # Linux, deliberately: everything except the Apple Events layer is testable
+    # off a Mac, and that layer's guards run before any osascript call.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.24' }
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go test -run=XXX -fuzz=FuzzDecode -fuzztime=60s ./internal/notestore
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.24' }
+      # Cross-compiled for the bridge Mac, which will not have a Go toolchain.
+      - run: GOOS=darwin GOARCH=${{ matrix.arch }} go build ./...
