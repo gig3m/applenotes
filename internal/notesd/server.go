@@ -27,10 +27,18 @@ import (
 type Server struct {
 	store *notestore.Store
 	token string
+	// live drops notes Notes.app no longer has. The database keeps a deleted
+	// note's row, pointing at its old folder with no flag set, for far longer
+	// than anyone is willing to wait.
+	live *liveSet
 }
 
 func New(store *notestore.Store, token string) *Server {
-	return &Server{store: store, token: token}
+	return &Server{
+		store: store,
+		token: token,
+		live:  newLiveSet(applescript.RunnerFunc(applescript.Run)),
+	}
 }
 
 // Handler returns the routes. Every one requires the token, including healthz:
@@ -213,6 +221,11 @@ func (s *Server) listNotes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Only when the trash is excluded. Asking for deleted notes and then
+	// dropping the ones Notes.app has moved to the trash would return nothing.
+	if r.URL.Query().Get("deleted") != "true" {
+		notes = s.live.filter(r.Context(), notes)
 	}
 	out := make([]noteJSON, 0, len(notes))
 	for _, n := range notes {
