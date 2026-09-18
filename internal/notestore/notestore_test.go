@@ -77,6 +77,19 @@ func runCheck(length int, done bool) []byte {
 	return append(fVarint(1, uint64(length)), fBytes(2, ps)...)
 }
 
+// runCheckStyleOnly sets only ParagraphStyle.style_type.
+func runCheckStyleOnly(length int) []byte {
+	style := int32(StyleChecklist)
+	return append(fVarint(1, uint64(length)), fBytes(2, fVarint(1, uint64(style)))...)
+}
+
+// runCheckFieldOnly sets only ParagraphStyle.checklist, leaving style_type at
+// its default.
+func runCheckFieldOnly(length int) []byte {
+	chk := append(fBytes(1, []byte("uuid")), fVarint(2, 0)...)
+	return append(fVarint(1, uint64(length)), fBytes(2, fBytes(5, chk))...)
+}
+
 func runQuote(length int) []byte {
 	style := int32(StyleBody) // via a variable: int32(-1) is rejected as an untyped constant
 	ps := append(fVarint(1, uint64(style)), fVarint(8, 1)...)
@@ -453,12 +466,55 @@ func TestDestroysDetectsContentLoss(t *testing.T) {
 		want string
 	}{
 		{"attachment", [][]byte{runAttach(1, "ID", "public.jpeg")}, "attachments"},
-		{"checklist", [][]byte{runCheck(4, false)}, "checklists"},
+		// Two fixtures, because a checklist can be encoded either way and one
+		// fixture setting both satisfies two independent guards at once.
+		{"checklist by style", [][]byte{runCheckStyleOnly(4)}, "checklists"},
+		{"checklist by field", [][]byte{runCheckFieldOnly(4)}, "checklists"},
 	} {
 		if got := decode(t, blob("text", tc.runs...)).Destroys(); !contains(got, tc.want) {
 			t.Errorf("%s: got %v, want it to include %q", tc.name, got, tc.want)
 		}
 	}
+}
+
+// Four paragraph styles with no output assertion at all until now.
+func TestParagraphStylePrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		style int
+		want  string
+	}{
+		{"title", StyleTitle, "# text"},
+		{"heading", StyleHeading, "## text"},
+		{"subheading", StyleSubhead, "### text"},
+		{"dash list", StyleDashList, "- text"},
+		{"dot list", StyleDotList, "- text"},
+	} {
+		got := decode(t, blob("text", run(4, 0, tc.style, ""))).Markdown()
+		if got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestBlockQuotePrefix(t *testing.T) {
+	if got, want := decode(t, blob("text", runQuote(4))).Markdown(), "> text"; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// A heading is recovered from an enlarged point size only when the line is also
+// bold. Without the bold requirement, any enlarged body text is promoted.
+func TestEnlargedButNotBoldIsNotAHeading(t *testing.T) {
+	got := decode(t, blob("text", runSizedNotBold(4, 24))).Markdown()
+	if strings.HasPrefix(got, "#") {
+		t.Errorf("promoted enlarged non-bold text to a heading: %q", got)
+	}
+}
+
+func runSizedNotBold(length int, size float32) []byte {
+	font := append(fBytes(1, []byte("Helvetica")), fFixed32(2, math.Float32bits(size))...)
+	return append(fVarint(1, uint64(length)), fBytes(3, font)...)
 }
 
 // An attachment whose submessage failed to decode still occupies its slot in

@@ -19,19 +19,30 @@ import (
 	"github.com/gig3m/applenotes/internal/notestore"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usageText)
-		os.Exit(2)
+func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
+
+// run is main's body with its streams and exit code injected, so the dispatch
+// can be tested. The -force wiring in particular has regressed to a dead
+// parameter once already, and nothing outside a test can catch that.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(stderr, "notes: internal error:", r)
+			code = 1
+		}
+	}()
+	if len(args) < 1 {
+		fmt.Fprint(stderr, usageText)
+		return 2
 	}
-	cmd := os.Args[1]
+	cmd := args[0]
 
 	// Flags are parsed per subcommand rather than globally: the stdlib flag
 	// package stops at the first non-flag argument, so a global FlagSet would
 	// silently ignore everything after the command name.
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stdout, usageText) } // -h is not an error
-	fs.SetOutput(os.Stderr)
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(stdout, usageText) } // -h is not an error
+	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "path to NoteStore.sqlite (default: the current user's)")
 	// Registered for every subcommand rather than only for list. Gating the
 	// allocation on the command name leaves nil pointers that the next alias or
@@ -39,73 +50,75 @@ func main() {
 	folder := fs.String("folder", "", "list: limit to a folder, by name or UUID")
 	deleted := fs.Bool("deleted", false, "list: include notes in Recently Deleted")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
-	// fs uses ExitOnError, so Parse never returns on failure.
-	fs.Parse(os.Args[2:])
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
+	usageErr := func(format string, a ...any) int {
+		fmt.Fprintf(stderr, "notes: "+format+"\n\n", a...)
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
 	if *force && cmd != "replace" {
-		fatalUsage("-force only applies to replace")
+		return usageErr("-force only applies to replace")
 	}
 
 	var err error
 	switch cmd {
 	case "list":
 		if fs.NArg() > 0 {
-			fatalUsage("list takes no arguments (did you mean -folder %s?)", fs.Arg(0))
+			return usageErr("list takes no arguments (did you mean -folder %s?)", fs.Arg(0))
 		}
-		err = list(*dbPath, *folder, *deleted)
+		err = list(stdout, *dbPath, *folder, *deleted)
 	case "folders":
 		if fs.NArg() > 0 {
-			fatalUsage("folders takes no arguments")
+			return usageErr("folders takes no arguments")
 		}
-		err = folders(*dbPath)
+		err = folders(stdout, *dbPath)
 	case "show":
 		if fs.NArg() != 1 {
-			fatalUsage("show needs exactly one note UUID")
+			return usageErr("show needs exactly one note UUID")
 		}
-		err = show(*dbPath, fs.Arg(0))
+		err = show(stdout, *dbPath, fs.Arg(0))
 	case "new":
 		if fs.NArg() > 0 {
-			fatalUsage("new reads Markdown from stdin and takes no arguments")
+			return usageErr("new reads Markdown from stdin and takes no arguments")
 		}
-		err = newNote(*dbPath, *folder)
+		err = newNote(stdin, stdout, stderr, *dbPath, *folder)
 	case "append":
 		if fs.NArg() != 1 {
-			fatalUsage("append needs exactly one note UUID")
+			return usageErr("append needs exactly one note UUID")
 		}
-		err = appendNote(*dbPath, fs.Arg(0))
+		err = appendNote(stdin, stderr, *dbPath, fs.Arg(0))
 	case "replace":
 		if fs.NArg() != 1 {
-			fatalUsage("replace needs exactly one note UUID")
+			return usageErr("replace needs exactly one note UUID")
 		}
-		err = replaceNote(*dbPath, fs.Arg(0), *force)
+		err = replaceNote(stdin, stderr, *dbPath, fs.Arg(0), *force)
 	case "rm":
 		if fs.NArg() != 1 {
-			fatalUsage("rm needs exactly one note UUID")
+			return usageErr("rm needs exactly one note UUID")
 		}
-		err = rmNote(*dbPath, fs.Arg(0))
+		err = rmNote(stderr, *dbPath, fs.Arg(0))
 	case "decode":
 		if fs.NArg() > 0 {
-			fatalUsage("decode reads from stdin and takes no arguments")
+			return usageErr("decode reads from stdin and takes no arguments")
 		}
-		err = decode(os.Stdin)
+		err = decode(stdin, stdout)
 	case "-h", "--help", "help":
-		fmt.Fprint(os.Stdout, usageText)
-		return
+		fmt.Fprint(stdout, usageText)
+		return 0
 	default:
-		fatalUsage("unknown command %q", cmd)
+		return usageErr("unknown command %q", cmd)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "notes:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "notes:", err)
+		return 1
 	}
-}
-
-// fatalUsage reports a usage error: exit 2 with the usage text, matching what
-// the flag package does for a bad flag.
-func fatalUsage(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "notes: "+format+"\n\n", args...)
-	fmt.Fprint(os.Stderr, usageText)
-	os.Exit(2)
+	return 0
 }
 
 const usageText = `usage: notes <command> [flags]
@@ -129,7 +142,7 @@ subfolders. Notes in Recently Deleted are hidden unless -deleted is given.
 
 func open(path string) (*notestore.Store, error) { return notestore.Open(path) }
 
-func list(path, folder string, deleted bool) error {
+func list(stdout io.Writer, path, folder string, deleted bool) error {
 	s, err := open(path)
 	if err != nil {
 		return err
@@ -140,7 +153,7 @@ func list(path, folder string, deleted bool) error {
 	if err != nil {
 		return err
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "MODIFIED\tFOLDER\tUUID\tTITLE")
 	for _, n := range notes {
 		title := n.Title
@@ -161,7 +174,7 @@ func list(path, folder string, deleted bool) error {
 	return w.Flush()
 }
 
-func folders(path string) error {
+func folders(stdout io.Writer, path string) error {
 	s, err := open(path)
 	if err != nil {
 		return err
@@ -172,7 +185,7 @@ func folders(path string) error {
 	if err != nil {
 		return err
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tUUID")
 	for _, f := range fs {
 		fmt.Fprintf(w, "%s\t%s\n", f.Name, f.UUID)
@@ -180,7 +193,7 @@ func folders(path string) error {
 	return w.Flush()
 }
 
-func show(path, uuid string) error {
+func show(stdout io.Writer, path, uuid string) error {
 	s, err := open(path)
 	if err != nil {
 		return err
@@ -198,7 +211,7 @@ func show(path, uuid string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(body.Markdown())
+	fmt.Fprintln(stdout, body.Markdown())
 	return nil
 }
 
@@ -213,8 +226,8 @@ func writer(path string) (*notestore.Store, *notesapp.Writer, error) {
 	return s, notesapp.New(s), nil
 }
 
-func newNote(path, folder string) error {
-	md, err := io.ReadAll(os.Stdin)
+func newNote(stdin io.Reader, stdout, stderr io.Writer, path, folder string) error {
+	md, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
 	}
@@ -229,7 +242,7 @@ func newNote(path, folder string) error {
 
 	uuid, err := w.Create(context.Background(), folder, string(md))
 	if errors.Is(err, notesapp.ErrNotYetVisible) {
-		fmt.Fprintln(os.Stderr,
+		fmt.Fprintln(stderr,
 			"notes: the note was created, but Notes.app has not written it to the\n"+
 				"       database yet, so its UUID is not known. Run 'notes list' later.")
 		return nil
@@ -237,32 +250,32 @@ func newNote(path, folder string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(uuid)
-	warnLag()
+	fmt.Fprintln(stdout, uuid)
+	warnLag(stderr)
 	return nil
 }
 
 // warnDegraded reports formatting the rewrite flattened. Nothing is removed,
 // but an indent becomes spaces in the text, so it is worth saying.
-func warnDegraded(features []string) {
+func warnDegraded(stderr io.Writer, features []string) {
 	if len(features) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr,
+	fmt.Fprintf(stderr,
 		"notes: this rewrite flattened %s.\n"+
 			"       No text is removed, though an indent becomes spaces in the text.\n",
 		strings.Join(features, ", "))
 }
 
 // warnLag explains why a write may not show up in list or show yet.
-func warnLag() {
-	fmt.Fprintln(os.Stderr,
+func warnLag(stderr io.Writer) {
+	fmt.Fprintln(stderr,
 		"notes: written. Notes.app persists changes to its database on its own\n"+
 			"       schedule, so this may not appear in list/show for a while.")
 }
 
-func appendNote(path, uuid string) error {
-	md, err := io.ReadAll(os.Stdin)
+func appendNote(stdin io.Reader, stderr io.Writer, path, uuid string) error {
+	md, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
 	}
@@ -285,13 +298,13 @@ func appendNote(path, uuid string) error {
 	if err != nil {
 		return err
 	}
-	warnDegraded(degraded)
-	warnLag()
+	warnDegraded(stderr, degraded)
+	warnLag(stderr)
 	return nil
 }
 
-func replaceNote(path, uuid string, force bool) error {
-	md, err := io.ReadAll(os.Stdin)
+func replaceNote(stdin io.Reader, stderr io.Writer, path, uuid string, force bool) error {
+	md, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
 	}
@@ -308,7 +321,7 @@ func replaceNote(path, uuid string, force bool) error {
 		if err := w.ReplaceForce(context.Background(), uuid, string(md)); err != nil {
 			return err
 		}
-		warnLag()
+		warnLag(stderr)
 		return nil
 	}
 
@@ -322,12 +335,12 @@ func replaceNote(path, uuid string, force bool) error {
 	if err != nil {
 		return err
 	}
-	warnDegraded(degraded)
-	warnLag()
+	warnDegraded(stderr, degraded)
+	warnLag(stderr)
 	return nil
 }
 
-func rmNote(path, uuid string) error {
+func rmNote(stderr io.Writer, path, uuid string) error {
 	s, w, err := writer(path)
 	if err != nil {
 		return err
@@ -336,11 +349,11 @@ func rmNote(path, uuid string) error {
 	if err := w.Delete(context.Background(), uuid); err != nil {
 		return err
 	}
-	warnLag()
+	warnLag(stderr)
 	return nil
 }
 
-func decode(r io.Reader) error {
+func decode(r io.Reader, stdout io.Writer) error {
 	blob, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -349,6 +362,6 @@ func decode(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(n.Markdown())
+	fmt.Fprintln(stdout, n.Markdown())
 	return nil
 }

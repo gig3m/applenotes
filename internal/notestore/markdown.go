@@ -553,8 +553,12 @@ func escapeLineStart(s string) string {
 			// stops the line beginning with whitespace while keeping the rest
 			// of the indentation intact.
 			// &#160;, not &#32;: a plain space would be collapsed away when
-			// this Markdown is converted back to HTML.
-			_, size := utf8.DecodeRuneInString(s)
+			// this Markdown is converted back to HTML. A tab is four columns,
+			// so replacing it with one reference would lose three of them.
+			first, size := utf8.DecodeRuneInString(s)
+			if first == '\t' {
+				return strings.Repeat("&#160;", 4) + s[size:]
+			}
 			return "&#160;" + s[size:]
 		}
 	}

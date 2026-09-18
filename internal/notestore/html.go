@@ -77,12 +77,16 @@ func ToHTML(md string) string {
 		// only ever consumed when it opens or closes a block -- one that does
 		// neither is content, and dropping it silently deleted note text.
 		if m := fenceRe.FindStringSubmatch(strings.TrimRight(trimmed, " \t")); m != nil {
+			marker := m[1]
+			if marker == "" {
+				marker = m[2]
+			}
 			if !inFence {
-				inFence, fence = true, m[1]
+				inFence, fence = true, marker
 				closeList()
 				continue
 			}
-			if m[1][0] == fence[0] && len(m[1]) >= len(fence) {
+			if marker[0] == fence[0] && len(marker) >= len(fence) {
 				inFence, fence = false, ""
 				continue
 			}
@@ -164,7 +168,7 @@ var (
 	numberRe  = regexp.MustCompile(`^\d+[.)][ \t](.*)$`)
 	quoteRe   = regexp.MustCompile(`^>[ \t]?(.*)$`)
 	checkRe   = regexp.MustCompile(`^\[([ xX])\][ \t](.*)$`)
-	fenceRe   = regexp.MustCompile("^(`{3,}|~{3,})\\s*\\S*$")
+	fenceRe   = regexp.MustCompile("^(`{3,})[ \\t]*[^`\\s]*$|^(~{3,})[ \\t]*[^~\\s]*$")
 
 	linkRe   = regexp.MustCompile(`\[([^\]]*)\]\(`)
 	codeRe   = regexp.MustCompile("`+")
@@ -185,36 +189,44 @@ var (
 // therefore works on already-escaped text and never escapes again. An earlier
 // version escaped first and unescaped last, so the emphasis patterns never saw
 // the backslashes and silently deleted the characters they were protecting.
-func inline(s string) string {
-	return inlineEscaped(escapeInline(s))
-}
+func inline(s string) string { return inlineRaw(s, true) }
 
-// inlineEscaped resolves code spans and links, in that order of precedence.
-// Code spans win: CommonMark gives them precedence over links, so a link
+// inlineRaw resolves code spans and links on unescaped text, escaping each
+// fragment in the way its context requires: a code span verbatim, everything
+// else with backslash escapes resolved. Escaping the whole line up front would
+// strip a code span's backslashes and decode its character references, which is
+// exactly the bug the fence path had.
+//
+// Code spans win over links: CommonMark gives them precedence, so a link
 // written inside backticks is literal text.
-func inlineEscaped(s string) string {
+func inlineRaw(s string, atEnd bool) string {
 	var b strings.Builder
 	for {
 		code := findCodeSpan(s)
-		link := linkRe.FindStringSubmatchIndex(s)
+		link := findLink(s)
 		switch {
 		case code == nil && link == nil:
-			b.WriteString(emphasis(s))
+			b.WriteString(emphasis(escapeFragment(s, atEnd)))
 			return b.String()
 		case link == nil || (code != nil && code[0] < link[0]):
-			b.WriteString(emphasis(s[:code[0]]))
-			body := strings.TrimSuffix(strings.TrimPrefix(s[code[1]:code[2]], " "), " ")
-			b.WriteString(`<font face="Menlo">` + body + "</font>")
+			b.WriteString(emphasis(escapeFragment(s[:code[0]], false)))
+			body := s[code[1]:code[2]]
+			// CommonMark strips one space from each end only when both are
+			// present and the content is not all spaces.
+			if strings.HasPrefix(body, " ") && strings.HasSuffix(body, " ") && strings.TrimSpace(body) != "" {
+				body = body[1 : len(body)-1]
+			}
+			b.WriteString(`<font face="Menlo">` + escapeVerbatim(body) + "</font>")
 			s = s[code[3]:]
 		default:
 			text := s[link[2]:link[3]]
 			dest, rest, ok := splitDestination(s[link[1]:])
 			if !ok {
-				b.WriteString(emphasis(s[:link[0]+1]))
+				b.WriteString(emphasis(escapeFragment(s[:link[0]+1], false)))
 				s = s[link[0]+1:]
 				continue
 			}
-			b.WriteString(emphasis(s[:link[0]]))
+			b.WriteString(emphasis(escapeFragment(s[:link[0]], false)))
 			b.WriteString(renderLink(text, dest))
 			s = rest
 		}
@@ -223,20 +235,74 @@ func inlineEscaped(s string) string {
 
 // findCodeSpan locates the next code span, returning the offsets of the opening
 // run, the body, and the end of the closing run. Backtick runs must match in
-// length, per CommonMark.
+// length, per CommonMark, and a backslash-escaped backtick is literal text.
 func findCodeSpan(s string) []int {
-	open := codeRe.FindStringIndex(s)
-	if open == nil {
+	openStart, openEnd := backtickRun(s, 0)
+	if openStart < 0 {
 		return nil
 	}
-	ticks := s[open[0]:open[1]]
-	after := s[open[1]:]
-	for _, m := range codeRe.FindAllStringIndex(after, -1) {
-		if after[m[0]:m[1]] == ticks {
-			return []int{open[0], open[1], open[1] + m[0], open[1] + m[1]}
+	ticks := s[openStart:openEnd]
+	for i := openEnd; i < len(s); {
+		closeStart, closeEnd := backtickRun(s, i)
+		if closeStart < 0 {
+			break
 		}
+		if s[closeStart:closeEnd] == ticks {
+			return []int{openStart, openEnd, closeStart, closeEnd}
+		}
+		i = closeEnd
 	}
 	return nil // an unmatched backtick is literal text
+}
+
+// backtickRun finds the next run of unescaped backticks at or after i.
+func backtickRun(s string, i int) (start, end int) {
+	for ; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++ // the next byte is literal
+			continue
+		}
+		if s[i] != '`' {
+			continue
+		}
+		start = i
+		for i < len(s) && s[i] == '`' {
+			i++
+		}
+		return start, i
+	}
+	return -1, -1
+}
+
+// findLink finds the next unescaped "[...](", returning the offsets of the
+// bracket, the text, and the byte after the opening paren.
+func findLink(s string) []int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if s[i] != '[' {
+			continue
+		}
+		for j := i + 1; j < len(s); j++ {
+			if s[j] == '\\' {
+				j++
+				continue
+			}
+			if s[j] == '[' {
+				break // nested; not a link this package emits
+			}
+			if s[j] != ']' {
+				continue
+			}
+			if j+1 < len(s) && s[j+1] == '(' {
+				return []int{i, j + 2, i + 1, j}
+			}
+			break
+		}
+	}
+	return nil
 }
 
 // splitDestination reads a link destination up to its matching close paren,
@@ -244,9 +310,9 @@ func findCodeSpan(s string) []int {
 func splitDestination(s string) (dest, rest string, ok bool) {
 	// An angle-bracketed destination runs to its closing bracket and may
 	// contain anything, including spaces.
-	if strings.HasPrefix(s, "&lt;") {
-		if end := strings.Index(s, "&gt;"); end >= 0 && end+4 < len(s) && s[end+4] == ')' {
-			return s[4:end], s[end+5:], true
+	if strings.HasPrefix(s, "<") {
+		if end := strings.Index(s, ">"); end >= 0 && end+1 < len(s) && s[end+1] == ')' {
+			return s[1:end], s[end+2:], true
 		}
 		return "", "", false
 	}
@@ -268,7 +334,10 @@ func splitDestination(s string) (dest, rest string, ok bool) {
 }
 
 func renderLink(text, dest string) string {
-	label := inlineEscaped(text)
+	// Link text is never the end of a line, so a trailing space inside it stays
+	// an ordinary space.
+	label := inlineRaw(text, false)
+	dest = escapeInline(dest)
 	for _, scheme := range allowedSchemes {
 		if strings.HasPrefix(strings.ToLower(dest), scheme) {
 			return `<a href="` + dest + `">` + label + "</a>"
@@ -282,21 +351,17 @@ func renderLink(text, dest string) string {
 // escapeInline HTML-escapes a line and resolves Markdown backslash escapes in
 // the same pass. An escaped delimiter becomes a character reference, so the
 // emphasis patterns below cannot match it and the character still renders.
-func escapeInline(s string) string {
+func escapeInline(s string) string { return escapeFragment(s, true) }
+
+// escapeFragment escapes one piece of a line. atEnd says whether the piece ends
+// the line: a trailing space must become non-breaking only there, or a space
+// before an inline code span would too.
+func escapeFragment(s string, atEnd bool) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c == ' ' && (i == 0 || i == len(s)-1 || s[i-1] == ' ' || s[i-1] == '\t') {
-			// A leading or trailing space, or the second and later space of a
-			// run, would be collapsed away. Only a non-breaking space survives; a numeric
-			// reference to U+0020 does not, because it is still a space by the
-			// time layout runs.
-			b.WriteString("&#160;")
-			continue
-		}
-		if c == '\t' {
-			b.WriteString("&#160;&#160;&#160;&#160;")
+		if n := writeSpaceAt(&b, s, i, atEnd); n > 0 {
 			continue
 		}
 		if c == '\\' && i+1 < len(s) && isMarkdownPunct(s[i+1]) {
@@ -334,9 +399,13 @@ func escapeInline(s string) string {
 // second and later space of a run, must be non-breaking: a numeric reference to
 // U+0020 does not help, because it is still a space by the time layout runs.
 func writeSpace(b *strings.Builder, s string, i int) int {
+	return writeSpaceAt(b, s, i, true)
+}
+
+func writeSpaceAt(b *strings.Builder, s string, i int, atEnd bool) int {
 	switch s[i] {
 	case ' ':
-		if i == 0 || i == len(s)-1 || s[i-1] == ' ' || s[i-1] == '\t' {
+		if i == 0 || (atEnd && i == len(s)-1) || s[i-1] == ' ' || s[i-1] == '\t' {
 			b.WriteString("&#160;")
 			return 1
 		}

@@ -124,15 +124,53 @@ func TestAngleWrappedDestination(t *testing.T) {
 	}
 }
 
-// An unrecognised scheme is not made clickable, but its text is preserved.
+// An unrecognised scheme is not made clickable, but its destination text is
+// preserved. The assertion is on the destination, not the label: the label is
+// emitted on every path, so asserting on it can never fail.
 func TestDisallowedSchemeIsNotLinked(t *testing.T) {
-	for _, md := range []string{"[a](javascript:alert(1))", "[a](data:text/html,x)"} {
-		got := ToHTML(md)
+	for _, tc := range []struct{ md, dest string }{
+		{"[a](javascript:alert(1))", "javascript:alert(1)"},
+		{"[a](data:text/html,x)", "data:text/html,x"},
+		// The allow-list matches a prefix, not a substring: an allowed scheme
+		// appearing later in the destination must not make it live.
+		{"[a](x:https://evil)", "x:https://evil"},
+	} {
+		got := ToHTML(tc.md)
 		if strings.Contains(got, "<a href") {
-			t.Errorf("%q produced a live link: %q", md, got)
+			t.Errorf("%q produced a live link: %q", tc.md, got)
 		}
-		if !strings.Contains(got, "a") {
-			t.Errorf("%q lost its text: %q", md, got)
+		if !strings.Contains(got, html.EscapeString(tc.dest)) {
+			t.Errorf("%q lost its destination text: %q", tc.md, got)
+		}
+	}
+}
+
+// A destination must not be able to break out of the href attribute. Asserting
+// on the absence of "<script>" cannot catch this, because the angle brackets
+// are escaped by a different branch than the quote.
+func TestDestinationCannotEscapeTheAttribute(t *testing.T) {
+	got := ToHTML(`[t](https://x.test/a"><script>alert(1)</script>)`)
+	if i := strings.Index(got, `href="`); i >= 0 {
+		rest := got[i+6:]
+		if end := strings.Index(rest, `"`); end >= 0 && strings.Contains(rest[:end], `"`) {
+			t.Errorf("raw quote inside href: %q", got)
+		}
+	}
+	if strings.Contains(got, `"><script`) {
+		t.Errorf("attribute break-out: %q", got)
+	}
+}
+
+// Backslash escapes and character references are literal inside a code span,
+// exactly as inside a fence. Escaping the line before finding the span
+// resolved them and deleted characters.
+func TestCodeSpanContentIsVerbatim(t *testing.T) {
+	for _, tc := range []struct{ md, want string }{
+		{"`a\\*b`", `<div><font face="Menlo">a\*b</font></div>`},
+		{"`&amp;`", `<div><font face="Menlo">&amp;amp;</font></div>`},
+	} {
+		if got := ToHTML(tc.md); got != tc.want {
+			t.Errorf("got %q want %q", got, tc.want)
 		}
 	}
 }
@@ -296,6 +334,14 @@ func TestWhitespaceIsNonBreaking(t *testing.T) {
 		// A backslash inside a fence is a backslash, not an escape.
 		{"fence backslash", "```\na\\_b\n```", `<div><font face="Menlo">a\_b</font></div>`},
 		{"fence with info string and trailing space", "```go \nx\n```", `<div><font face="Menlo">x</font></div>`},
+		// Tab-indented code is the case that matters for Go and Makefiles, and
+		// it went through a different branch than the space-indented one.
+		{"fence tab indent", "```\n\tif x:\n```", `<div><font face="Menlo">&#160;&#160;&#160;&#160;if x:</font></div>`},
+		// A line that is itself a code span is not a fence marker; treating it
+		// as one deleted the line.
+		{"code span line is not a fence", "```x```\nrest", `<div><font face="Menlo">x</font></div><div>rest</div>`},
+		{"checklist separator", "- [ ]   lead", "<ul><li>\u2610 &#160;&#160;lead</li></ul>"},
+		{"uppercase checkbox", "- [X] done", "<ul><li>\u2611 done</li></ul>"},
 		// No separator after a marker means it is not a marker.
 		{"no separator is not a heading", "#head", "<div>#head</div>"},
 		{"no separator is not a bullet", "-item", "<div>-item</div>"},
