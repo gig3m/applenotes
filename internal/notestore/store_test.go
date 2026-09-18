@@ -2,7 +2,9 @@ package notestore
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,11 +14,20 @@ import (
 func newTestDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "NoteStore.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path)
+	// WAL, matching the real database -- read-only access to a WAL database is
+	// the thing most likely to break.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" {
+		t.Fatalf("fixture journal_mode = %s, want wal", mode)
+	}
 
 	mustExec(t, db, `CREATE TABLE ZICCLOUDSYNCINGOBJECT (
 		Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER TEXT, ZTITLE1 TEXT, ZTITLE2 TEXT,
@@ -42,9 +53,21 @@ func newTestDB(t *testing.T) string {
 		(103, 'UUID-D', 'Delta',  '',       2, 203, 100000, 200000, 0, 0, 0),
 		(104, 'UUID-E', 'Echo',   '',       1, 204, 100000, 100000, 0, 0, 1)`)
 
+	// 105: no folder. 106: no title. 107: ZNOTEDATA set but no body row.
+	// 108: ZMODIFICATIONDATE1 NULL, newest by its fallback column.
+	// 109: ZCREATIONDATE1 stored as 0, with a real date in the next column.
+	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT
+		(Z_PK, ZIDENTIFIER, ZTITLE1, ZFOLDER, ZNOTEDATA, ZCREATIONDATE1, ZCREATIONDATE, ZMODIFICATIONDATE1, ZMODIFICATIONDATE) VALUES
+		(105, 'UUID-F', 'Foxtrot', NULL, 205, 100000, NULL, 50000,  NULL),
+		(106, 'UUID-G', NULL,      1,    206, 100000, NULL, 40000,  NULL),
+		(107, 'UUID-H', 'Hotel',   1,    303, 100000, NULL, 30000,  NULL),
+		(108, 'UUID-I', 'India',   1,    207, 100000, NULL, NULL,   900000),
+		(109, 'UUID-J', 'Juliet',  1,    208, 0,      77000, 20000, NULL)`)
+
 	body := blob("Alpha\nlinked", run(6, 0, -2, ""), run(6, 0, -2, "https://x.test/a"))
 	stmt := `INSERT INTO ZICNOTEDATA (Z_PK, ZNOTE, ZDATA) VALUES (?, ?, ?)`
-	for i, pk := range []int{100, 101, 102, 103, 104} {
+	// Note 107 deliberately gets no row here.
+	for i, pk := range []int{100, 101, 102, 103, 104, 105, 106, 108, 109} {
 		if _, err := db.Exec(stmt, 200+i, pk, body); err != nil {
 			t.Fatal(err)
 		}
@@ -100,20 +123,160 @@ func TestNotesExcludesTrashByDefault(t *testing.T) {
 	for _, n := range visible {
 		titles = append(titles, n.Title)
 	}
-	if len(visible) != 3 {
-		t.Fatalf("got %v, want Alpha, Bravo, Echo", titles)
+	// Alpha, Bravo, Echo, Foxtrot, India, Juliet and the untitled one; Hotel is
+	// excluded for having no body row, Charlie and Delta are in the trash.
+	if len(visible) != 7 {
+		t.Fatalf("got %d notes %v, want 7", len(visible), titles)
 	}
-	// newest first
-	if visible[0].Title != "Alpha" || visible[2].Title != "Echo" {
-		t.Errorf("wrong order: %v", titles)
+	for _, n := range visible {
+		if n.Title == "Hotel" {
+			t.Error("a note with no body row should not be listed")
+		}
 	}
 
 	all, err := s.Notes(ListOptions{IncludeDeleted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 5 {
-		t.Errorf("got %d with deleted, want 5", len(all))
+	if len(all) != 9 {
+		t.Errorf("got %d with deleted, want 9", len(all))
+	}
+}
+
+// A note sorts by the same timestamp the listing displays. Ordering on
+// ZMODIFICATIONDATE1 alone puts a note whose date lives in the fallback column
+// last while showing it as the newest.
+func TestNotesOrderMatchesDisplayedTime(t *testing.T) {
+	got, err := openTest(t).Notes(ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Title != "India" {
+		t.Errorf("newest is %q, want India", got[0].Title)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Modified.After(got[i-1].Modified) {
+			t.Fatalf("not sorted newest-first at %d: %v", i, got[i].Title)
+		}
+	}
+}
+
+// A note with no title still has content and must be reachable.
+func TestUntitledNoteIsVisible(t *testing.T) {
+	m, err := openTest(t).Meta("UUID-G")
+	if err != nil {
+		t.Fatalf("untitled note unreachable: %v", err)
+	}
+	if m.Title != "" {
+		t.Errorf("got title %q, want empty", m.Title)
+	}
+}
+
+// A NULL ZFOLDER must not drop the note: that is what the LEFT JOIN is for.
+func TestNoteWithoutFolder(t *testing.T) {
+	m, err := openTest(t).Meta("UUID-F")
+	if err != nil {
+		t.Fatalf("folderless note unreachable: %v", err)
+	}
+	if m.FolderName != "" {
+		t.Errorf("got folder %q, want empty", m.FolderName)
+	}
+}
+
+// list and show must agree: a note with no body row is listed by neither.
+func TestNoteWithoutBodyRowIsHidden(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.Meta("UUID-H"); err != ErrNotFound {
+		t.Errorf("Meta: got %v want ErrNotFound", err)
+	}
+	if _, err := s.Body("UUID-H"); err != ErrNotFound {
+		t.Errorf("Body: got %v want ErrNotFound", err)
+	}
+}
+
+// A stored 0 must not end the fallback chain and mask a real timestamp.
+func TestZeroTimestampFallsThrough(t *testing.T) {
+	m, err := openTest(t).Meta("UUID-J")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Created.IsZero() {
+		t.Fatal("creation date was masked by a stored 0")
+	}
+	if got, want := m.Created.Unix(), int64(77000+coreDataEpoch); got != want {
+		t.Errorf("got %d want %d", got, want)
+	}
+}
+
+// The trash flag alone misses a note that is in the trash by its folder.
+func TestTrashedCoversBothRoutes(t *testing.T) {
+	all, err := openTest(t).Notes(ListOptions{IncludeDeleted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, n := range all {
+		if n.Trashed {
+			seen[n.Title] = true
+		}
+	}
+	for _, want := range []string{"Charlie", "Delta"} {
+		if !seen[want] {
+			t.Errorf("%s not reported as trashed", want)
+		}
+	}
+}
+
+// The database must be opened read-only, and a path containing URI
+// metacharacters must not defeat that.
+func TestOpenIsReadOnly(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.db.Exec("CREATE TABLE zzz_written (a)"); err == nil {
+		t.Fatal("the database was opened writable")
+	}
+}
+
+func TestOpenPathWithURIMetacharacters(t *testing.T) {
+	src := newTestDB(t)
+	for _, name := range []string{"note #1.sqlite", "note?mode=rw.sqlite", "100%25.sqlite"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, name)
+			copyFile(t, src, dst)
+
+			s, err := Open(dst)
+			if err != nil {
+				t.Fatalf("could not open %q: %v", name, err)
+			}
+			defer s.Close()
+			if _, err := s.Folders(); err != nil {
+				t.Fatalf("Folders: %v", err)
+			}
+			if _, err := s.db.Exec("CREATE TABLE zzz_written (a)"); err == nil {
+				t.Error("mode=ro was discarded: the database is writable")
+			}
+			// Nothing may be created alongside it.
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if n := e.Name(); n != name && !strings.HasPrefix(n, name) {
+					t.Errorf("Open created a stray file: %q", n)
+				}
+			}
+		})
+	}
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -142,8 +305,9 @@ func TestMetaAndBody(t *testing.T) {
 	if want := "applenotes:note/UUID-A"; m.DeepLink() != want {
 		t.Errorf("got %q want %q", m.DeepLink(), want)
 	}
-	// 500000s after 2001-01-01 UTC
-	if want := time.Unix(500000+coreDataEpoch, 0).UTC(); !m.Modified.Equal(want) {
+	// Core Data counts seconds from 2001-01-01 UTC. Written out rather than
+	// derived from coreDataEpoch, so an off-by-one in the constant fails here.
+	if want := time.Date(2001, 1, 6, 18, 53, 20, 0, time.UTC); !m.Modified.Equal(want) {
 		t.Errorf("got %v want %v", m.Modified, want)
 	}
 

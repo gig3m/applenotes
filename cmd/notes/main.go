@@ -32,29 +32,33 @@ func main() {
 		folder = fs.String("folder", "", "limit to a folder, by name or UUID")
 		deleted = fs.Bool("deleted", false, "include notes in Recently Deleted")
 	}
-	if err := fs.Parse(os.Args[2:]); err != nil {
-		os.Exit(2)
-	}
+	// fs uses ExitOnError, so Parse never returns on failure.
+	fs.Parse(os.Args[2:])
 
 	var err error
 	switch cmd {
 	case "list":
+		if fs.NArg() > 0 {
+			fatalUsage("list takes no arguments (did you mean -folder %s?)", fs.Arg(0))
+		}
 		err = list(*dbPath, *folder, *deleted)
 	case "folders":
+		if fs.NArg() > 0 {
+			fatalUsage("folders takes no arguments")
+		}
 		err = folders(*dbPath)
 	case "show":
-		if fs.NArg() < 1 {
-			err = fmt.Errorf("show needs a note UUID")
-		} else {
-			err = show(*dbPath, fs.Arg(0))
+		if fs.NArg() != 1 {
+			fatalUsage("show needs exactly one note UUID")
 		}
+		err = show(*dbPath, fs.Arg(0))
 	case "decode":
 		err = decode(os.Stdin)
 	case "-h", "--help", "help":
-		usage()
+		fmt.Fprint(os.Stdout, usageText)
 		return
 	default:
-		err = fmt.Errorf("unknown command %q", cmd)
+		fatalUsage("unknown command %q", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "notes:", err)
@@ -62,8 +66,17 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `usage: notes <command> [flags]
+// fatalUsage reports a usage error: exit 2 with the usage text, matching what
+// the flag package does for a bad flag.
+func fatalUsage(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "notes: "+format+"\n\n", args...)
+	fmt.Fprint(os.Stderr, usageText)
+	os.Exit(2)
+}
+
+func usage() { fmt.Fprint(os.Stderr, usageText) }
+
+const usageText = `usage: notes <command> [flags]
 
 commands:
   list [-folder NAME] [-deleted]   list notes, newest first
@@ -73,8 +86,10 @@ commands:
 
 common flags:
   -db PATH   path to NoteStore.sqlite (default: the current user's)
-`)
-}
+
+-folder matches a folder by name or UUID and does not descend into
+subfolders. Notes in Recently Deleted are hidden unless -deleted is given.
+`
 
 func open(path string) (*notestore.Store, error) { return notestore.Open(path) }
 
@@ -93,10 +108,15 @@ func list(path, folder string, deleted bool) error {
 	fmt.Fprintln(w, "MODIFIED\tFOLDER\tUUID\tTITLE")
 	for _, n := range notes {
 		title := n.Title
+		if title == "" {
+			title = "(untitled)"
+		}
 		if n.Locked {
 			title += "  [locked]"
 		}
-		if n.Deleted {
+		// Trashed, not Deleted: a note reaches the trash by more than one
+		// route and the flag alone misses some of them.
+		if n.Trashed {
 			title += "  [deleted]"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",

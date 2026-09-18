@@ -96,8 +96,16 @@ Deleted are hidden unless you ask for them, by either route into the trash --
 the deletion flag, or simply living in that folder. Password-protected notes
 are listed and flagged but their bodies are not readable.
 
-Reads are strictly read-only: the database is opened `mode=ro` and nothing in
-this tool writes to Notes or to iCloud.
+`-folder` matches by name or UUID and does not descend into subfolders.
+
+Reads are strictly read-only: the database is opened `mode=ro`, and nothing in
+this tool modifies a note, the database, or iCloud. One caveat, because SQLite
+requires it: opening a WAL-mode database creates its `-shm` and `-wal` sidecar
+files if they are absent. Against a live Notes database both already exist and
+nothing is created. Against a *copy*, SQLite will create empty sidecars next to
+it — so copy `NoteStore.sqlite-wal` and `-shm` along with the database, or you
+will also be reading a stale snapshot that is missing everything Notes has not
+yet checkpointed.
 
 ## Prior art
 

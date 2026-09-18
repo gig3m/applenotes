@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -48,7 +49,9 @@ type NoteMeta struct {
 	FolderName string
 	Created    time.Time
 	Modified   time.Time
-	Deleted    bool
+	FolderUUID string
+	Deleted    bool // ZMARKEDFORDELETION on the note itself
+	Trashed    bool // in Recently Deleted by any route: the flag, the folder, or a deleted folder
 	Pinned     bool
 	Locked     bool // password-protected; the body is not readable
 }
@@ -71,13 +74,37 @@ func Open(path string) (*Store, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("notestore: %w", err)
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	// The DSN must be built as a URL, not concatenated. SQLite parses file:
+	// DSNs as URIs, so a '#' in the path truncates the query string and
+	// silently discards mode=ro -- which then opens read-write and creates the
+	// file. A '?' lets an earlier mode= win. Both are reachable from an
+	// ordinary path like "~/Desktop/backup #1/NoteStore.sqlite".
+	dsn := (&url.URL{
+		Scheme: "file",
+		Path:   abs,
+		RawQuery: url.Values{
+			"mode": {"ro"},
+			// WAL readers can still hit an exclusive lock during wal-index
+			// recovery or a checkpoint; without a timeout the query fails
+			// immediately instead of retrying. Matters for a polling daemon.
+			"_pragma": {"busy_timeout(5000)"},
+		}.Encode(),
+	}).String()
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// One connection: each would map its own -shm, and nothing here benefits
+	// from concurrency.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("notestore: opening %s: %w", path, err)
+		return nil, fmt.Errorf("notestore: opening %s: %w (if this is a copied database, its -wal and -shm files must be copied too, and the directory must be writable)", abs, err)
 	}
 	return &Store{db: db}, nil
 }
@@ -115,6 +142,10 @@ type ListOptions struct {
 	Folder         string // folder name or UUID; empty means all
 }
 
+// A row is a note when a body row points back at it. Testing ZNOTEDATA IS NOT
+// NULL only checks the foreign key, so a note whose body has not arrived yet --
+// the shape CloudKit produces mid-sync -- would list but fail to open. Title is
+// not required either: a note whose first line is empty can have none.
 const noteSelect = `
 	SELECT n.Z_PK,
 	       COALESCE(n.ZIDENTIFIER, ''),
@@ -122,14 +153,16 @@ const noteSelect = `
 	       COALESCE(n.ZSNIPPET, ''),
 	       COALESCE(n.ZFOLDER, 0),
 	       COALESCE(f.ZTITLE2, ''),
-	       COALESCE(n.ZCREATIONDATE1, n.ZCREATIONDATE, n.ZCREATIONDATE2, 0),
-	       COALESCE(n.ZMODIFICATIONDATE1, n.ZMODIFICATIONDATE, 0),
+	       COALESCE(f.ZIDENTIFIER, ''),
+	       n.ZCREATIONDATE1, n.ZCREATIONDATE, n.ZCREATIONDATE2,
+	       n.ZMODIFICATIONDATE1, n.ZMODIFICATIONDATE,
 	       COALESCE(n.ZMARKEDFORDELETION, 0),
 	       COALESCE(n.ZISPINNED, 0),
-	       COALESCE(n.ZISPASSWORDPROTECTED, 0)
+	       COALESCE(n.ZISPASSWORDPROTECTED, 0),
+	       COALESCE(f.ZMARKEDFORDELETION, 0)
 	FROM ZICCLOUDSYNCINGOBJECT n
 	LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON f.Z_PK = n.ZFOLDER
-	WHERE n.ZTITLE1 IS NOT NULL AND n.ZNOTEDATA IS NOT NULL`
+	WHERE EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)`
 
 // Notes lists note metadata, newest first.
 func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
@@ -139,13 +172,14 @@ func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
 		// A note is in the trash either by its own flag or by living in the
 		// Recently Deleted folder.
 		q += ` AND COALESCE(n.ZMARKEDFORDELETION, 0) = 0
-		       AND COALESCE(f.ZIDENTIFIER, '') <> 'TrashFolder-CloudKit'`
+		       AND COALESCE(f.ZIDENTIFIER, '') <> 'TrashFolder-CloudKit'
+		       AND COALESCE(f.ZMARKEDFORDELETION, 0) = 0`
 	}
 	if opt.Folder != "" {
 		q += ` AND (f.ZTITLE2 = ? OR f.ZIDENTIFIER = ?)`
 		args = append(args, opt.Folder, opt.Folder)
 	}
-	q += ` ORDER BY n.ZMODIFICATIONDATE1 DESC`
+	q += ` ORDER BY COALESCE(n.ZMODIFICATIONDATE1, n.ZMODIFICATIONDATE, 0) DESC, n.Z_PK DESC`
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -160,7 +194,7 @@ var ErrNotFound = errors.New("notestore: note not found")
 
 // Meta looks a note up by its ZIDENTIFIER UUID.
 func (s *Store) Meta(uuid string) (NoteMeta, error) {
-	rows, err := s.db.Query(noteSelect+` AND n.ZIDENTIFIER = ?`, uuid)
+	rows, err := s.db.Query(noteSelect+` AND n.ZIDENTIFIER = ? ORDER BY n.Z_PK LIMIT 1`, uuid)
 	if err != nil {
 		return NoteMeta{}, err
 	}
@@ -178,11 +212,14 @@ func (s *Store) Meta(uuid string) (NoteMeta, error) {
 // Body fetches and decodes a note's contents by UUID.
 func (s *Store) Body(uuid string) (*Note, error) {
 	var blob []byte
+	// Ordered to match Meta, so a duplicated UUID cannot make show print one
+	// row's body under another row's metadata.
 	err := s.db.QueryRow(`
 		SELECT d.ZDATA
 		FROM ZICCLOUDSYNCINGOBJECT n
 		JOIN ZICNOTEDATA d ON d.ZNOTE = n.Z_PK
-		WHERE n.ZIDENTIFIER = ? AND d.ZDATA IS NOT NULL`, uuid).Scan(&blob)
+		WHERE n.ZIDENTIFIER = ? AND d.ZDATA IS NOT NULL
+		ORDER BY n.Z_PK LIMIT 1`, uuid).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -196,18 +233,34 @@ func scanNotes(rows *sql.Rows) ([]NoteMeta, error) {
 	var out []NoteMeta
 	for rows.Next() {
 		var n NoteMeta
-		var created, modified float64
-		var del, pin, locked int
+		var c1, c2, c3, m1, m2 sql.NullFloat64
+		var del, pin, locked, folderDel int
 		if err := rows.Scan(&n.ID, &n.UUID, &n.Title, &n.Snippet, &n.FolderID,
-			&n.FolderName, &created, &modified, &del, &pin, &locked); err != nil {
+			&n.FolderName, &n.FolderUUID, &c1, &c2, &c3, &m1, &m2,
+			&del, &pin, &locked, &folderDel); err != nil {
 			return nil, err
 		}
-		n.Created = coreDataTime(created)
-		n.Modified = coreDataTime(modified)
-		n.Deleted, n.Pinned, n.Locked = del != 0, pin != 0, locked != 0
+		// The fallback is resolved here rather than with COALESCE, which stops
+		// at the first non-NULL: a stored 0.0 would end the chain and mask a
+		// real timestamp in the next column.
+		n.Created = firstTime(c1, c2, c3)
+		n.Modified = firstTime(m1, m2)
+		n.Pinned, n.Locked = pin != 0, locked != 0
+		n.Deleted = del != 0
+		n.Trashed = n.Deleted || n.FolderUUID == "TrashFolder-CloudKit" || folderDel != 0
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// firstTime returns the first timestamp that is present and non-zero.
+func firstTime(vals ...sql.NullFloat64) time.Time {
+	for _, v := range vals {
+		if v.Valid && v.Float64 != 0 {
+			return coreDataTime(v.Float64)
+		}
+	}
+	return time.Time{}
 }
 
 func coreDataTime(v float64) time.Time {
