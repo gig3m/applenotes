@@ -146,11 +146,16 @@ something: reading through AppleScript drops every hyperlink, and rewriting from
 Markdown drops anything Markdown cannot express.
 
 So `append` reads the body from SQLite, which keeps links, and **refuses**
-rather than damaging a note holding anything the rewrite cannot carry:
-attachments, checklists, block quotes, subheadings, monospaced paragraphs,
-indentation, alignment, underlining, superscript. `replace` refuses on the same
-grounds — pass `-force` to overwrite anyway. Edit those notes in Notes.app
-instead.
+rather than damaging a note whose content a rewrite would lose outright —
+attachments and checklists. `replace` refuses on the same grounds; pass
+`-force` to overwrite anyway. Edit those notes in Notes.app instead.
+
+Formatting that merely flattens — indentation, block quotes, subheadings,
+monospaced paragraphs, alignment, underlining, superscript — does **not** block
+a write. Treating it as fatal would be worse than the problem: underlining
+rides along with hyperlinks in real notes (a quarter of the link runs in a real
+library carry it), so refusing on it would make most notes containing a link
+unwritable.
 
 Leading and repeated spaces are written as non-breaking spaces, because a plain
 space is collapsed away by HTML. Indentation and the double space after a full

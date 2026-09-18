@@ -285,7 +285,23 @@ func replaceNote(path, uuid string, force bool) error {
 		return err
 	}
 	defer s.Close()
-	if err := w.Replace(context.Background(), uuid, string(md)); err != nil {
+
+	if force {
+		if err := w.ReplaceForce(context.Background(), uuid, string(md)); err != nil {
+			return err
+		}
+		warnLag()
+		return nil
+	}
+
+	err = w.Replace(context.Background(), uuid, string(md))
+	var lossy *notesapp.ErrLossyRewrite
+	if errors.As(err, &lossy) {
+		return fmt.Errorf("%w.\n"+
+			"       Rewriting the note from Markdown cannot carry that content.\n"+
+			"       Pass -force to overwrite anyway", err)
+	}
+	if err != nil {
 		return err
 	}
 	warnLag()

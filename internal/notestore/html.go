@@ -33,7 +33,13 @@ func ToHTML(md string) string {
 	}, md)
 	// Only line terminators are trimmed. Trimming spaces here as well would
 	// take them off the last line, which is content.
-	lines := strings.Split(strings.TrimRight(md, "\n"), "\n")
+	md = strings.TrimRight(md, "\n")
+	if i := strings.LastIndexByte(md, '\n'); i >= 0 && strings.TrimSpace(md[i+1:]) == "" {
+		// A whitespace-only last line is a leftover terminator, not a
+		// paragraph; emitting it adds a blank line to the note.
+		md = md[:i]
+	}
+	lines := strings.Split(md, "\n")
 
 	listKind := "" // "ul", "ol", or ""
 	inFence := false
@@ -277,9 +283,9 @@ func escapeInline(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c == ' ' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
-			// A leading space, or the second and later space of a run, would be
-			// collapsed away. Only a non-breaking space survives; a numeric
+		if c == ' ' && (i == 0 || i == len(s)-1 || s[i-1] == ' ' || s[i-1] == '\t') {
+			// A leading or trailing space, or the second and later space of a
+			// run, would be collapsed away. Only a non-breaking space survives; a numeric
 			// reference to U+0020 does not, because it is still a space by the
 			// time layout runs.
 			b.WriteString("&#160;")

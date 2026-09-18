@@ -268,3 +268,27 @@ func TestPartialBoldIsNotAHeading(t *testing.T) {
 		t.Errorf("promoted a partially-bold line to a heading: %q", got)
 	}
 }
+
+// Whitespace assertions are made on the HTML, not on a round trip: a round trip
+// that unescapes &#160; back to a space cannot tell whether the mechanism is
+// there at all, and an earlier version of these tests passed with it deleted.
+func TestWhitespaceIsNonBreaking(t *testing.T) {
+	for _, tc := range []struct{ name, md, want string }{
+		{"interior run", "a  b", "<div>a &#160;b</div>"},
+		{"leading", " a", "<div>&#160;a</div>"},
+		{"trailing", "a ", "<div>a&#160;</div>"},
+		{"tab", "\ta", "<div>&#160;&#160;&#160;&#160;a</div>"},
+		{"single interior space untouched", "a b", "<div>a b</div>"},
+	} {
+		if got := ToHTML(tc.md); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A whitespace-only final line is a leftover terminator, not a paragraph.
+func TestTrailingWhitespaceLineIsNotAParagraph(t *testing.T) {
+	if got, want := ToHTML("a\n  \n"), "<div>a</div>"; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}

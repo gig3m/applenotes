@@ -445,10 +445,8 @@ func runFontLink(length int, name, link string) []byte {
 	return append(b, fBytes(9, []byte(link))...)
 }
 
-// Rewriting a note means converting it to Markdown and back, which cannot carry
-// everything Notes can store. Lossy names what would be destroyed so a caller
-// can refuse instead of damaging the note.
-func TestLossyDetectsUnrepresentableContent(t *testing.T) {
+// Destroys names content a rewrite would lose outright, so a caller can refuse.
+func TestDestroysDetectsContentLoss(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		runs [][]byte
@@ -456,34 +454,74 @@ func TestLossyDetectsUnrepresentableContent(t *testing.T) {
 	}{
 		{"attachment", [][]byte{runAttach(1, "ID", "public.jpeg")}, "attachments"},
 		{"checklist", [][]byte{runCheck(4, false)}, "checklists"},
-		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
-		{"nested list", [][]byte{runIndent(4, StyleDotList, 1)}, "indentation"},
-		{"block quote", [][]byte{runQuote(4)}, "block quotes"},
 	} {
-		n := decode(t, blob("text", tc.runs...))
-		got := n.Lossy()
-		if len(got) == 0 {
-			t.Errorf("%s: reported no loss", tc.name)
-			continue
-		}
-		var found bool
-		for _, g := range got {
-			if g == tc.want {
-				found = true
-			}
-		}
-		if !found {
+		if got := decode(t, blob("text", tc.runs...)).Destroys(); !contains(got, tc.want) {
 			t.Errorf("%s: got %v, want it to include %q", tc.name, got, tc.want)
 		}
 	}
 }
 
-// Ordinary prose is safe to rewrite.
-func TestLossyAllowsPlainNotes(t *testing.T) {
-	n := decode(t, blob("title\nbody", run(6, 0, StyleTitle, ""), run(4, FontBold, -2, "https://x.test")))
-	if got := n.Lossy(); len(got) != 0 {
-		t.Errorf("plain note reported lossy: %v", got)
+// Degrades names formatting that would flatten. It must never block a write, so
+// it is reported separately from Destroys.
+func TestDegradesDetectsFormattingLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		runs [][]byte
+		want string
+	}{
+		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
+		{"monospace", [][]byte{run(4, 0, StyleMonospace, "")}, "monospaced paragraphs"},
+		{"indent", [][]byte{runIndent(4, StyleDotList, 1)}, "indentation"},
+		{"block quote", [][]byte{runQuote(4)}, "block quotes"},
+		{"underline", [][]byte{runUnderline(4)}, "underlining"},
+	} {
+		if got := decode(t, blob("text", tc.runs...)).Degrades(); !contains(got, tc.want) {
+			t.Errorf("%s: got %v, want it to include %q", tc.name, got, tc.want)
+		}
+		// None of these may block a write.
+		if got := decode(t, blob("text", tc.runs...)).Destroys(); len(got) != 0 {
+			t.Errorf("%s: formatting reported as destructive: %v", tc.name, got)
+		}
 	}
+}
+
+// Underline rides along with hyperlinks in real notes -- a quarter of the link
+// runs in a real library carry it -- so it must not make a linked note
+// unwritable.
+func TestUnderlinedLinkIsNotDestructive(t *testing.T) {
+	n := decode(t, blob("link", runUnderlineLink(4, "https://x.test")))
+	if got := n.Destroys(); len(got) != 0 {
+		t.Errorf("an underlined link blocked the write: %v", got)
+	}
+}
+
+// Ordinary prose is safe to rewrite.
+func TestPlainNoteIsNeitherDestructiveNorDegraded(t *testing.T) {
+	n := decode(t, blob("title\nbody", run(6, 0, StyleTitle, ""), run(4, FontBold, -2, "https://x.test")))
+	if got := n.Destroys(); len(got) != 0 {
+		t.Errorf("plain note reported destructive: %v", got)
+	}
+	if got := n.Degrades(); len(got) != 0 {
+		t.Errorf("plain note reported degraded: %v", got)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func runUnderline(length int) []byte {
+	return append(fVarint(1, uint64(length)), fVarint(6, 1)...)
+}
+
+func runUnderlineLink(length int, link string) []byte {
+	b := append(fVarint(1, uint64(length)), fVarint(6, 1)...)
+	return append(b, fBytes(9, []byte(link))...)
 }
 
 // An attachment run that also carries a link must not be folded into the link
@@ -497,7 +535,7 @@ func TestAttachmentInsideLinkIsNotGrouped(t *testing.T) {
 	// The attachment ends the link group, so the text either side is linked
 	// separately. What must not happen is the attachment's own brackets being
 	// nested inside the surrounding link.
-	if strings.Contains(got, "[a[") || strings.Contains(got, "]b](") {
+	if strings.Contains(got, "[[") {
 		t.Errorf("nested link brackets: %q", got)
 	}
 	if !strings.Contains(got, "applenotes:attachment/ID") {

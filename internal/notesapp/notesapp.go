@@ -73,8 +73,9 @@ func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, e
 	return w.uuidFor(scriptID)
 }
 
-// ErrLossyRewrite reports that a note holds content a Markdown round trip
-// cannot preserve, so appending to it would destroy that content.
+// ErrLossyRewrite reports that a note holds content a Markdown rewrite would
+// destroy outright -- attachments or checklists, not merely formatting that
+// would flatten.
 type ErrLossyRewrite struct{ Features []string }
 
 func (e *ErrLossyRewrite) Error() string {
@@ -90,9 +91,10 @@ func (e *ErrLossyRewrite) Error() string {
 // from Markdown drops anything Markdown cannot express.
 //
 // So the body is read from SQLite, which preserves links, and the note is
-// checked first for content that the rewrite would destroy -- attachments,
-// checklists, block quotes, subheadings, nested lists. If it has any, this
-// refuses with *ErrLossyRewrite rather than damaging the note.
+// checked first for content the rewrite would destroy -- attachments and
+// checklists. If it has any, this refuses with *ErrLossyRewrite rather than
+// damaging the note. Formatting that would merely flatten is reported by
+// Note.Degrades and does not block the write.
 //
 // Two further caveats apply even when it succeeds. The read comes from the
 // database, so an edit still buffered in Notes.app is not included -- and is
@@ -103,8 +105,8 @@ func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
 	if err != nil {
 		return err
 	}
-	if lossy := body.Lossy(); len(lossy) > 0 {
-		return &ErrLossyRewrite{Features: lossy}
+	if lost := body.Destroys(); len(lost) > 0 {
+		return &ErrLossyRewrite{Features: lost}
 	}
 	existing := body.Markdown()
 	if existing != "" {
@@ -125,13 +127,19 @@ end run`
 //
 // It refuses with *ErrLossyRewrite when the note holds content the new body
 // cannot carry, because the overwhelmingly common use is show-edit-replace and
-// that silently discards attachments, checklists and the rest. ReplaceForce
-// skips the check for a caller that genuinely means to discard them.
+// that would silently discard attachments and checklists. Formatting that
+// merely flattens is not grounds for refusing; Note.Degrades reports that
+// separately. ReplaceForce skips the check for a caller that means it.
 func (w *Writer) Replace(ctx context.Context, uuid, markdown string) error {
-	if body, err := w.store.Body(uuid); err == nil {
-		if lossy := body.Lossy(); len(lossy) > 0 {
-			return &ErrLossyRewrite{Features: lossy}
-		}
+	// Fails closed. A body that cannot be read is a locked or corrupt note --
+	// exactly the case where least is known and most could be lost -- so an
+	// unreadable note is refused rather than silently overwritten.
+	body, err := w.store.Body(uuid)
+	if err != nil {
+		return fmt.Errorf("cannot check what this rewrite would destroy: %w", err)
+	}
+	if lost := body.Destroys(); len(lost) > 0 {
+		return &ErrLossyRewrite{Features: lost}
 	}
 	return w.ReplaceForce(ctx, uuid, markdown)
 }

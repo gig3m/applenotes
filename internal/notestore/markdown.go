@@ -612,43 +612,50 @@ func escapeURL(u string) string {
 	return b.String()
 }
 
-// Lossy reports the features of a note that a Markdown round trip cannot
-// preserve, as human-readable names. It is empty when the note can safely be
-// re-rendered from its Markdown.
+// Destroys reports content that a Markdown rewrite would lose outright: things
+// Notes stores that have no Markdown representation at all, where the data
+// itself goes, not merely its appearance.
 //
-// Rewriting a note means converting it to Markdown and back, and Notes can
-// store things Markdown cannot express through HTML. Anything listed here would
-// be destroyed by that trip, so callers rewriting an existing note must check
-// first.
-func (n *Note) Lossy() []string {
-	seen := map[string]bool{}
+// Rewriting a note means converting it to Markdown and back. Callers doing that
+// to an existing note must check this first and refuse.
+func (n *Note) Destroys() []string {
 	var out []string
-	add := func(s string) {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
+	add := adder(&out)
 	for i := range n.Runs {
 		r := &n.Runs[i]
 		if r.Attachment != nil {
 			add("attachments")
 		}
-		// Decoded but never rendered, so a rewrite drops them.
+		if ps := r.ParagraphStyle; ps != nil {
+			if ps.Checklist != nil || ps.StyleType == StyleChecklist {
+				add("checklists")
+			}
+		}
+	}
+	return out
+}
+
+// Degrades reports formatting a Markdown rewrite would flatten. Every character
+// survives; only its appearance changes.
+//
+// This is deliberately not grounds for refusing a write. Underline in
+// particular rides along with hyperlinks -- a quarter of the link runs in a
+// real library carry it -- so treating it as fatal would make most notes
+// containing a link unwritable.
+func (n *Note) Degrades() []string {
+	var out []string
+	add := adder(&out)
+	for i := range n.Runs {
+		r := &n.Runs[i]
 		if r.Underlined {
 			add("underlining")
 		}
 		if r.Superscript != 0 {
 			add("superscript or subscript")
 		}
-		if r.ParagraphStyle == nil {
-			continue
-		}
-		// Not a switch: a run can carry several of these at once, and each
-		// needs naming so the explanation is complete.
 		ps := r.ParagraphStyle
-		if ps.Checklist != nil || ps.StyleType == StyleChecklist {
-			add("checklists")
+		if ps == nil {
+			continue
 		}
 		if ps.StyleType == StyleSubhead {
 			add("subheadings")
@@ -667,4 +674,14 @@ func (n *Note) Lossy() []string {
 		}
 	}
 	return out
+}
+
+func adder(out *[]string) func(string) {
+	seen := map[string]bool{}
+	return func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			*out = append(*out, s)
+		}
+	}
 }
