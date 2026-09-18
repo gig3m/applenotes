@@ -26,6 +26,12 @@ var ErrInvalidArgument = errors.New("applescript: unusable argument")
 
 var ErrNotPermitted = errors.New("applescript: not permitted to control Notes (grant Automation access, or run from a logged-in GUI session)")
 
+// ErrInTrash reports a write aimed at a note in Recently Deleted. Notes refuses
+// those, and the refusal is worth naming: the database can still show such a
+// note as ordinary for a minute or more after it is moved, so a client is not
+// being careless when it tries.
+var ErrInTrash = errors.New("applescript: this note is in Recently Deleted and cannot be edited; restore it in Notes.app first")
+
 // DefaultTimeout bounds a single Apple Event. They are slow, and a blocked
 // consent prompt otherwise hangs forever with no output.
 //
@@ -106,10 +112,13 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 		if strings.Contains(msg, "-1743") || strings.Contains(msg, "Not authorized") {
 			return "", ErrNotPermitted
 		}
+		if strings.Contains(msg, "Recently Deleted") {
+			return "", ErrInTrash
+		}
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("applescript: %s: %w", msg, err)
+		return "", fmt.Errorf("applescript: %s: %w", cleanScriptError(msg), err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -120,4 +129,30 @@ func Available(ctx context.Context) error {
 	tell application "Notes" to return name of default account
 end run`)
 	return err
+}
+
+// cleanScriptError strips osascript's framing so the sentence Notes actually
+// produced is what a caller sees.
+//
+// osascript reports failures as "97:139: execution error: <message> (-10000)",
+// where the numbers are byte offsets into a script the user never wrote and
+// cannot read. Left in, they are the first thing shown and the message is
+// pushed out of a one-line status bar entirely.
+func cleanScriptError(msg string) string {
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if i := strings.Index(line, "execution error: "); i >= 0 {
+			line = line[i+len("execution error: "):]
+		}
+		// The trailing OSStatus is the only part of the framing worth keeping,
+		// and only when nothing else survives.
+		line = strings.TrimSpace(strings.TrimSuffix(line, "."))
+		if line != "" {
+			return line
+		}
+	}
+	return msg
 }
