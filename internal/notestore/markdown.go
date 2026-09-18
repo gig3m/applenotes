@@ -325,7 +325,27 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 	}
 
 	var b strings.Builder
-	for _, s := range mergeSpans(spans) {
+	merged := mergeSpans(spans)
+	for i := 0; i < len(merged); i++ {
+		// Consecutive spans sharing a link are one link. They are often split
+		// because something inside differs -- a code span, a bold word -- and
+		// emitting each separately turns one link into several.
+		if l := merged[i].link; l != "" {
+			j := i
+			for j+1 < len(merged) && merged[j+1].link == l {
+				j++
+			}
+			group := make([]span, 0, j-i+1)
+			for _, g := range merged[i : j+1] {
+				g.link = ""
+				group = append(group, g)
+			}
+			inner := renderSpans(group, wholeLineMono)
+			b.WriteString("[" + inner + "](" + escapeURL(l) + ")")
+			i = j
+			continue
+		}
+		s := merged[i]
 		t := s.text
 		if t == "" {
 			continue
@@ -363,9 +383,6 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 			core = "**" + core + "**"
 		} else if s.italic {
 			core = "*" + core + "*"
-		}
-		if s.link != "" {
-			core = "[" + core + "](" + escapeURL(s.link) + ")"
 		}
 		b.WriteString(lead + core + trail)
 	}

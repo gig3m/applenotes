@@ -114,10 +114,12 @@ What does not survive, because Notes has no way to express it through HTML:
 
 | Markdown | Becomes |
 |---|---|
-| `> quote` | plain text — block quotes are not encoded at all |
+| `> quote` | literal `> text` — block quotes are not encoded at all, so the marker is kept as characters rather than losing the line |
 | `- [ ]` / `- [x]` | a bullet prefixed `☐`/`☑`; real checklists cannot be created |
 | fenced code | monospaced lines, not a block |
-| `####` and deeper | clamped to `###` |
+| `###` and deeper | clamped to `##` — h3 carries no point size, so Notes stores it as plain bold and it cannot be recovered |
+| an unrecognised link scheme | text, not a live link — only http, https, mailto, tel, file, message and applenotes are linked |
+| nested lists | flattened to one level |
 
 ### Writes are not immediately visible to reads
 
@@ -138,9 +140,12 @@ is not observable through the read path for an unbounded period, so:
   write, so it cannot be used to confirm one — only to notice changes made on
   other devices, once Notes gets around to persisting them.
 
-`append` is the one operation that reads a note's body through AppleScript in
-order to concatenate, **so it drops any hyperlink already in that note**. To add
-to a note that contains links, read it with `show`, edit, and `replace`.
+`append` reads the existing body from SQLite and rewrites the whole note, rather
+than concatenating through AppleScript — reading a body through AppleScript
+drops every hyperlink in it, so the obvious implementation would silently
+destroy links in the note being appended to. Because the read comes from the
+database, `append` works from the note as last persisted; see the section
+above.
 
 `show` takes the `ZIDENTIFIER` UUID that `list` prints. Notes in Recently
 Deleted are hidden unless you ask for them, by any of the three routes into the

@@ -23,6 +23,14 @@ func ToHTML(md string) string {
 	// Trailing blank lines are not content. Emitting them adds an empty
 	// paragraph that the next read renders back, so a note would grow by a line
 	// on every round trip.
+	// NUL and other C0 controls cannot travel in argv -- os/exec rejects an
+	// argument containing NUL outright -- and none of them are note content.
+	md = strings.Map(func(r rune) rune {
+		if r == 0 || (r < 0x20 && r != '\n' && r != '\t') {
+			return -1
+		}
+		return r
+	}, md)
 	lines := strings.Split(strings.TrimRight(md, "\n \t"), "\n")
 
 	listKind := "" // "ul", "ol", or ""
@@ -53,15 +61,19 @@ func ToHTML(md string) string {
 		trimmed := strings.TrimSpace(line)
 
 		// Fenced code: emitted verbatim in a monospaced div, since Notes has no
-		// block-level code construct reachable through HTML.
+		// block-level code construct reachable through HTML. A fence marker is
+		// only ever consumed when it opens or closes a block -- one that does
+		// neither is content, and dropping it silently deleted note text.
 		if m := fenceRe.FindStringSubmatch(trimmed); m != nil {
 			if !inFence {
 				inFence, fence = true, m[1]
 				closeList()
-			} else if strings.HasPrefix(m[1], fence[:1]) && len(m[1]) >= len(fence) {
-				inFence, fence = false, ""
+				continue
 			}
-			continue
+			if m[1][0] == fence[0] && len(m[1]) >= len(fence) {
+				inFence, fence = false, ""
+				continue
+			}
 		}
 		if inFence {
 			fmt.Fprintf(&b, "<div><font face=\"Menlo\">%s</font></div>", html.EscapeString(line))
@@ -76,9 +88,12 @@ func ToHTML(md string) string {
 
 		if m := headingRe.FindStringSubmatch(trimmed); m != nil {
 			closeList()
+			// h3 and below carry no point size, so Notes stores them as plain
+			// bold and they read back as **text** rather than a heading.
+			// Clamping to h2 is lossy but stable across a round trip.
 			level := len(m[1])
-			if level > 3 {
-				level = 3
+			if level > 2 {
+				level = 2
 			}
 			fmt.Fprintf(&b, "<h%d>%s</h%d>", level, inline(m[2]), level)
 			continue
@@ -86,7 +101,10 @@ func ToHTML(md string) string {
 
 		if m := quoteRe.FindStringSubmatch(trimmed); m != nil {
 			closeList()
-			fmt.Fprintf(&b, "<blockquote><div>%s</div></blockquote>", inline(m[1]))
+			// Notes drops <blockquote> entirely, taking the text with it, so
+			// the marker is kept as literal text instead. This also protects an
+			// ordinary line like ">= 5" that merely looks like a quote.
+			fmt.Fprintf(&b, "<div>&gt; %s</div>", inline(m[1]))
 			continue
 		}
 
@@ -114,10 +132,16 @@ func ToHTML(md string) string {
 		}
 
 		closeList()
-		fmt.Fprintf(&b, "<div>%s</div>", inline(line))
+		fmt.Fprintf(&b, "<div>%s</div>", inline(trimmed))
 	}
 	closeList()
-	return b.String()
+	out := b.String()
+	if out == "" && strings.TrimSpace(md) != "" {
+		// Never turn non-blank Markdown into nothing: a caller would overwrite
+		// a note with an empty body.
+		out = "<div>" + html.EscapeString(strings.TrimSpace(md)) + "</div>"
+	}
+	return out
 }
 
 var (
@@ -126,51 +150,135 @@ var (
 	numberRe  = regexp.MustCompile(`^\d+[.)]\s+(.*)$`)
 	quoteRe   = regexp.MustCompile(`^>\s?(.*)$`)
 	checkRe   = regexp.MustCompile(`^\[([ xX])\]\s+(.*)$`)
-	fenceRe   = regexp.MustCompile("^(`{3,}|~{3,})\\s*\\w*$")
+	fenceRe   = regexp.MustCompile("^(`{3,}|~{3,})\\s*\\S*$")
 
-	linkRe   = regexp.MustCompile(`\[([^\]]*)\]\(([^)\s]+)\)`)
-	codeRe   = regexp.MustCompile("`+[^`]*`+")
+	linkRe   = regexp.MustCompile(`\[([^\]]*)\]\(`)
+	codeRe   = regexp.MustCompile("`+")
 	strongRe = regexp.MustCompile(`\*\*\*([^*]+)\*\*\*|___([^_]+)___`)
-	boldRe   = regexp.MustCompile(`\*\*([^*]+)\*\*|__([^_]+)__`)
+	boldRe   = regexp.MustCompile(`\*\*([^*]+)\*\*|(^|[^_\w])__([^_]+)__`)
 	italicRe = regexp.MustCompile(`(^|[^*\w])\*([^*]+)\*|(^|[^_\w])_([^_]+)_`)
 	strikeRe = regexp.MustCompile(`~~([^~]+)~~`)
+
+	// Schemes a note may link to. Anything else is emitted as text rather than
+	// as a live destination.
+	allowedSchemes = []string{"http://", "https://", "mailto:", "tel:", "applenotes:", "message:", "file://"}
 )
 
-// inline converts a line's inline Markdown. Code spans are extracted first so
-// their contents are never treated as emphasis, then restored at the end.
+// inline converts a line's inline Markdown to HTML.
+//
+// Links are resolved first and code spans second, each by splitting the string
+// rather than substituting placeholders. An earlier version reserved sentinel
+// strings in the text; note content could contain the sentinel, and a code span
+// inside link text left one behind unreplaced.
 func inline(s string) string {
-	var code []string
-	s = codeRe.ReplaceAllStringFunc(s, func(m string) string {
-		body := strings.Trim(m, "`")
+	var b strings.Builder
+	for {
+		loc := linkRe.FindStringSubmatchIndex(s)
+		if loc == nil {
+			break
+		}
+		text := s[loc[2]:loc[3]]
+		dest, rest, ok := splitDestination(s[loc[1]:])
+		if !ok {
+			// Not a link after all: emit the "[" and carry on from just after
+			// it so the rest of the line is still processed.
+			b.WriteString(inlineNoLinks(s[:loc[0]+1]))
+			s = s[loc[0]+1:]
+			continue
+		}
+		b.WriteString(inlineNoLinks(s[:loc[0]]))
+		b.WriteString(renderLink(text, dest))
+		s = rest
+	}
+	b.WriteString(inlineNoLinks(s))
+	return b.String()
+}
+
+// splitDestination reads a link destination up to its matching close paren,
+// allowing balanced parens inside it so a Wikipedia-style URL survives.
+func splitDestination(s string) (dest, rest string, ok bool) {
+	// An angle-bracketed destination runs to its closing bracket and may
+	// contain anything, including spaces.
+	if strings.HasPrefix(s, "<") {
+		if end := strings.Index(s, ">"); end >= 0 && end+1 < len(s) && s[end+1] == ')' {
+			return s[:end+1], s[end+2:], true
+		}
+		return "", "", false
+	}
+	depth := 1
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return s[:i], s[i+1:], true
+			}
+		case ' ', '\t':
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+func renderLink(text, dest string) string {
+	label := inlineNoLinks(text)
+	// The renderer wraps a destination containing parens or whitespace in angle
+	// brackets, per CommonMark. Unwrap it so such a link survives a round trip.
+	if strings.HasPrefix(dest, "<") && strings.HasSuffix(dest, ">") {
+		dest = dest[1 : len(dest)-1]
+	}
+	dest = unescapeMarkdown(dest)
+	for _, scheme := range allowedSchemes {
+		if strings.HasPrefix(strings.ToLower(dest), scheme) {
+			return "<a href=\"" + html.EscapeString(dest) + "\">" + label + "</a>"
+		}
+	}
+	// An unrecognised scheme -- javascript:, data:, or a bare word -- is not
+	// made clickable. The text is preserved so nothing is lost.
+	return label + " (" + html.EscapeString(dest) + ")"
+}
+
+// inlineNoLinks handles everything except links: code spans are split out so
+// their contents are never read as emphasis, then escaped and emitted verbatim.
+func inlineNoLinks(s string) string {
+	var b strings.Builder
+	for {
+		open := codeRe.FindStringIndex(s)
+		if open == nil {
+			break
+		}
+		ticks := s[open[0]:open[1]]
+		after := s[open[1]:]
+		closeIdx := -1
+		for _, m := range codeRe.FindAllStringIndex(after, -1) {
+			if after[m[0]:m[1]] == ticks {
+				closeIdx = m[0]
+				break
+			}
+		}
+		if closeIdx < 0 {
+			break // an unmatched backtick is literal text
+		}
+		b.WriteString(emphasis(s[:open[0]]))
+		body := after[:closeIdx]
 		body = strings.TrimPrefix(body, " ")
 		body = strings.TrimSuffix(body, " ")
-		code = append(code, body)
-		return fmt.Sprintf("\x00CODE%d\x00", len(code)-1)
-	})
+		b.WriteString("<font face=\"Menlo\">" + html.EscapeString(body) + "</font>")
+		s = after[closeIdx+len(ticks):]
+	}
+	b.WriteString(emphasis(s))
+	return b.String()
+}
 
-	var links [][2]string
-	s = linkRe.ReplaceAllStringFunc(s, func(m string) string {
-		p := linkRe.FindStringSubmatch(m)
-		links = append(links, [2]string{p[1], p[2]})
-		return fmt.Sprintf("\x00LINK%d\x00", len(links)-1)
-	})
-
+func emphasis(s string) string {
 	s = html.EscapeString(s)
 	s = strongRe.ReplaceAllString(s, "<b><i>$1$2</i></b>")
-	s = boldRe.ReplaceAllString(s, "<b>$1$2</b>")
+	s = boldRe.ReplaceAllString(s, "$2<b>$1$3</b>")
 	s = italicRe.ReplaceAllString(s, "$1$3<i>$2$4</i>")
 	s = strikeRe.ReplaceAllString(s, "<s>$1</s>")
-	s = unescapeMarkdown(s)
-
-	for i, c := range code {
-		s = strings.Replace(s, fmt.Sprintf("\x00CODE%d\x00", i),
-			"<font face=\"Menlo\">"+html.EscapeString(c)+"</font>", 1)
-	}
-	for i, l := range links {
-		s = strings.Replace(s, fmt.Sprintf("\x00LINK%d\x00", i),
-			fmt.Sprintf("<a href=%q>%s</a>", html.EscapeString(l[1]), inline(l[0])), 1)
-	}
-	return s
+	return unescapeMarkdown(s)
 }
 
 // unescapeMarkdown turns backslash escapes back into their literal character,

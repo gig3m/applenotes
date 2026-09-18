@@ -1,6 +1,7 @@
 package notestore
 
 import (
+	"html"
 	"strings"
 	"testing"
 )
@@ -9,11 +10,16 @@ func TestToHTMLBlocks(t *testing.T) {
 	for _, tc := range []struct{ name, md, want string }{
 		{"paragraph", "hello", "<div>hello</div>"},
 		{"heading", "## Title", "<h2>Title</h2>"},
-		{"deep heading clamps", "##### Deep", "<h3>Deep</h3>"},
+		// h3 and below carry no point size, so Notes stores them as plain bold
+		// and they read back as **text**. Clamping to h2 keeps them stable.
+		{"deep heading clamps to h2", "##### Deep", "<h2>Deep</h2>"},
 		{"bullets", "- a\n- b", "<ul><li>a</li><li>b</li></ul>"},
 		{"numbered", "1. a\n2. b", "<ol><li>a</li><li>b</li></ol>"},
 		{"blank line", "a\n\nb", "<div>a</div><div><br></div><div>b</div>"},
-		{"quote", "> q", "<blockquote><div>q</div></blockquote>"},
+		// Notes drops <blockquote> and its text with it, so the marker is kept
+		// as literal characters instead.
+		{"quote keeps its text", "> q", "<div>&gt; q</div>"},
+		{"quote-looking text", ">= 5 is the rule", "<div>&gt; = 5 is the rule</div>"},
 	} {
 		if got := ToHTML(tc.md); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
@@ -46,6 +52,121 @@ func TestToHTMLInline(t *testing.T) {
 }
 
 // A code span is literal: emphasis markers inside it are text.
+// A code span inside link text previously left an unreplaced sentinel -- and a
+// NUL byte -- in the output, which os/exec rejects outright.
+func TestCodeSpanInsideLinkText(t *testing.T) {
+	got := ToHTML("[see `foo`](https://x.test)")
+	want := `<div><a href="https://x.test">see <font face="Menlo">foo</font></a></div>`
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// Nothing may ever reach argv with a NUL in it.
+func TestToHTMLNeverEmitsNUL(t *testing.T) {
+	for _, md := range []string{
+		"[see `foo`](https://x.test)",
+		"\x00CODE0\x00 and `real`",
+		"`a` `b` [x](`y`)",
+	} {
+		if strings.ContainsRune(ToHTML(md), 0) {
+			t.Errorf("NUL in output for %q", md)
+		}
+	}
+}
+
+// A fence marker that neither opens nor closes a block is content. Dropping it
+// silently deleted note text, and could empty a note entirely.
+func TestFenceNeverDeletesContent(t *testing.T) {
+	for _, tc := range []struct{ md, mustContain string }{
+		{"~~~\n```\n~~~", "```"},
+		{"```\n~~~\nkept\n```", "~~~"},
+	} {
+		got := ToHTML(tc.md)
+		if !strings.Contains(got, html.EscapeString(tc.mustContain)) {
+			t.Errorf("%q: lost %q, got %q", tc.md, tc.mustContain, got)
+		}
+	}
+}
+
+// Non-blank Markdown must never convert to nothing; a caller would otherwise
+// overwrite a note with an empty body.
+func TestToHTMLNeverEmptyForNonBlankInput(t *testing.T) {
+	for _, md := range []string{"```\n```", "~~~\n```\n~~~", "> ", "#", "-"} {
+		if got := ToHTML(md); got == "" {
+			t.Errorf("empty HTML for %q", md)
+		}
+	}
+}
+
+// A destination may contain balanced parens.
+func TestLinkWithParensInURL(t *testing.T) {
+	got := ToHTML("[t](https://en.wikipedia.org/wiki/Go_(programming_language))")
+	want := `<div><a href="https://en.wikipedia.org/wiki/Go_(programming_language)">t</a></div>`
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// The renderer emits an angle-wrapped destination when a URL contains parens
+// or whitespace; that form must convert back to the same link.
+func TestAngleWrappedDestination(t *testing.T) {
+	for _, tc := range []struct{ md, want string }{
+		{"[t](<https://en.wikipedia.org/wiki/Go_(programming_language)>)",
+			`<div><a href="https://en.wikipedia.org/wiki/Go_(programming_language)">t</a></div>`},
+		{"[t](<https://x.test/a%20b>)", `<div><a href="https://x.test/a%20b">t</a></div>`},
+	} {
+		if got := ToHTML(tc.md); got != tc.want {
+			t.Errorf("got %q want %q", got, tc.want)
+		}
+	}
+}
+
+// An unrecognised scheme is not made clickable, but its text is preserved.
+func TestDisallowedSchemeIsNotLinked(t *testing.T) {
+	for _, md := range []string{"[a](javascript:alert(1))", "[a](data:text/html,x)"} {
+		got := ToHTML(md)
+		if strings.Contains(got, "<a href") {
+			t.Errorf("%q produced a live link: %q", md, got)
+		}
+		if !strings.Contains(got, "a") {
+			t.Errorf("%q lost its text: %q", md, got)
+		}
+	}
+}
+
+// Intraword underscores are not emphasis.
+func TestIntrawordUnderscores(t *testing.T) {
+	for _, md := range []string{"foo__bar__baz", "snake_case_name", "a_b_c"} {
+		if got := ToHTML(md); strings.Contains(got, "<b>") || strings.Contains(got, "<i>") {
+			t.Errorf("%q was emphasised: %q", md, got)
+		}
+	}
+}
+
+// Every text path is escaped. These are the call sites a mutation test showed
+// were previously unguarded.
+func TestEscapingAtEveryCallSite(t *testing.T) {
+	for _, tc := range []struct{ name, md string }{
+		{"href", "[t](https://x.test/?a=1&b=<2>)"},
+		{"code span", "`<script>`"},
+		{"fenced code", "```\n<script>\n```"},
+		{"link text", "[<script>](https://x.test)"},
+		{"body", "<script>"},
+	} {
+		if strings.Contains(ToHTML(tc.md), "<script>") {
+			t.Errorf("%s: unescaped: %q", tc.name, ToHTML(tc.md))
+		}
+	}
+}
+
+func TestChecklistMarks(t *testing.T) {
+	got := ToHTML("- [ ] todo\n- [x] done")
+	if !strings.Contains(got, "☐ todo") || !strings.Contains(got, "☑ done") {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestToHTMLCodeSpanIsNotEmphasised(t *testing.T) {
 	got := ToHTML("`a*b*c`")
 	if strings.Contains(got, "<i>") {

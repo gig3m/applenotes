@@ -305,10 +305,15 @@ func (s *Store) ScriptID(uuid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The same predicate Meta and Body use. ZICCLOUDSYNCINGOBJECT holds
+	// folders and accounts too, so without it a folder UUID would be formatted
+	// as a note id and handed to AppleScript.
 	var pk int64
-	err = s.db.QueryRow(
-		`SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT WHERE ZIDENTIFIER = ? ORDER BY Z_PK LIMIT 1`,
-		uuid).Scan(&pk)
+	err = s.db.QueryRow(`
+		SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT n
+		WHERE n.ZIDENTIFIER = ?
+		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
+		ORDER BY Z_PK LIMIT 1`, uuid).Scan(&pk)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -319,12 +324,15 @@ func (s *Store) ScriptID(uuid string) (string, error) {
 }
 
 // UUIDForPK returns the portable UUID for a Core Data row id.
-func (s *Store) UUIDForPK(pk string) (string, error) {
+func (s *Store) UUIDForPK(pk int64) (string, error) {
 	var u string
 	err := s.db.QueryRow(
 		`SELECT ZIDENTIFIER FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = ?`, pk).Scan(&u)
 	if errors.Is(err, sql.ErrNoRows) || u == "" {
 		return "", ErrNotFound
 	}
-	return u, err
+	if err != nil {
+		return "", fmt.Errorf("notestore: looking up uuid for row %d: %w", pk, err)
+	}
+	return u, nil
 }

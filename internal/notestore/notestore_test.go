@@ -419,3 +419,22 @@ func FuzzDecode(f *testing.F) {
 		_ = n.PlainText()
 	})
 }
+
+// A link split across runs -- by a code span, a bold word, anything the
+// renderer styles differently -- is still one link, not several.
+func TestLinkSpanningSeveralRunsIsOneLink(t *testing.T) {
+	const url = "https://x.test/docs"
+	got := decode(t, blob("the foo bar",
+		run(4, FontDefault, -2, url),
+		runFontLink(4, "Menlo-Regular", url),
+		run(3, FontDefault, -2, url))).Markdown()
+	want := "[the `foo` bar](" + url + ")"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func runFontLink(length int, name, link string) []byte {
+	b := append(fVarint(1, uint64(length)), fBytes(3, fBytes(1, []byte(name)))...)
+	return append(b, fBytes(9, []byte(link))...)
+}

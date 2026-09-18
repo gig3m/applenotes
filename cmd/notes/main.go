@@ -1,11 +1,13 @@
-// Command notes reads Apple Notes from the local NoteStore database.
+// Command notes reads and writes Apple Notes on this Mac.
 //
-// It is read-only: nothing here writes to Notes or to iCloud.
+// Reads come from the local NoteStore database, which is opened read-only.
+// Writes go through Apple Events to Notes.app, which owns that file.
 package main
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -220,6 +222,12 @@ func newNote(path, folder string) error {
 	defer s.Close()
 
 	uuid, err := w.Create(context.Background(), folder, string(md))
+	if errors.Is(err, notesapp.ErrNotYetVisible) {
+		fmt.Fprintln(os.Stderr,
+			"notes: the note was created, but Notes.app has not written it to the\n"+
+				"       database yet, so its UUID is not known. Run 'notes list' later.")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -239,6 +247,9 @@ func appendNote(path, uuid string) error {
 	md, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
+	}
+	if len(bytes.TrimSpace(md)) == 0 {
+		return fmt.Errorf("refusing to append an empty body")
 	}
 	s, w, err := writer(path)
 	if err != nil {

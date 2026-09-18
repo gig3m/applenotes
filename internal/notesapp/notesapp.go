@@ -20,6 +20,9 @@ package notesapp
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gig3m/applenotes/internal/applescript"
@@ -49,10 +52,19 @@ const createScript = `on run argv
 	end tell
 end run`
 
+// ErrNotYetVisible reports that a note was written but has not reached
+// NoteStore.sqlite yet, so its portable UUID cannot be determined. Notes.app
+// persists on its own schedule; the note exists regardless.
+var ErrNotYetVisible = errors.New("notesapp: note created but not yet in the database")
+
 // Create makes a note from Markdown and returns its portable UUID.
 //
 // The title is not set separately: Notes derives it from the body's first line,
 // and setting both yields the title twice.
+//
+// It returns ErrNotYetVisible when the note has not been persisted yet, which
+// is the common case immediately after a write. The note has still been
+// created; only its UUID is unknown.
 func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, error) {
 	scriptID, err := applescript.Run(ctx, createScript, folder, notestore.ToHTML(markdown))
 	if err != nil {
@@ -61,27 +73,26 @@ func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, e
 	return w.uuidFor(scriptID)
 }
 
-const appendScript = `on run argv
-	set noteID to item 1 of argv
-	set extraHTML to item 2 of argv
-	tell application "Notes"
-		set theNote to note id noteID
-		set body of theNote to (body of theNote) & extraHTML
-	end tell
-end run`
-
 // Append adds Markdown to the end of a note.
 //
-// This reads the note's body through AppleScript in order to concatenate, which
-// loses any hyperlink in the existing note. Callers that care must use Replace
-// with a body read from SQLite instead.
+// The existing body is read from SQLite and the whole note rewritten, rather
+// than concatenated through AppleScript. Reading a body through AppleScript
+// drops every hyperlink in it, so the obvious implementation silently destroys
+// links in the note being appended to.
+//
+// Because the read comes from the database, this appends to the note as last
+// persisted. Notes.app buffers writes, so an edit made on the Mac in the last
+// few moments may not be included.
 func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
-	id, err := w.store.ScriptID(uuid)
+	body, err := w.store.Body(uuid)
 	if err != nil {
 		return err
 	}
-	_, err = applescript.Run(ctx, appendScript, id, notestore.ToHTML(markdown))
-	return err
+	existing := body.Markdown()
+	if existing != "" {
+		existing += "\n"
+	}
+	return w.Replace(ctx, uuid, existing+markdown)
 }
 
 const replaceScript = `on run argv
@@ -118,13 +129,27 @@ func (w *Writer) Delete(ctx context.Context, uuid string) error {
 }
 
 // uuidFor maps a freshly created note's x-coredata id back to its portable
-// UUID. The note may not be in the database yet, so this is best-effort: the
-// caller gets the script id back if the row has not landed.
+// UUID.
+//
+// It deliberately does not fall back to returning the x-coredata id: that id is
+// local to this machine and no command here accepts it, so handing it back
+// would produce a "note not found" later, nondeterministically depending on
+// when Notes flushed.
 func (w *Writer) uuidFor(scriptID string) (string, error) {
-	pk := scriptID[strings.LastIndex(scriptID, "/p")+2:]
-	uuid, err := w.store.UUIDForPK(pk)
+	i := strings.LastIndex(scriptID, "/p")
+	if i < 0 {
+		return "", fmt.Errorf("notesapp: unrecognised note id %q", scriptID)
+	}
+	pk, err := strconv.ParseInt(scriptID[i+2:], 10, 64)
 	if err != nil {
-		return scriptID, nil
+		return "", fmt.Errorf("notesapp: unrecognised note id %q", scriptID)
+	}
+	uuid, err := w.store.UUIDForPK(pk)
+	if errors.Is(err, notestore.ErrNotFound) {
+		return "", ErrNotYetVisible
+	}
+	if err != nil {
+		return "", err
 	}
 	return uuid, nil
 }
