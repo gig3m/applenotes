@@ -71,15 +71,33 @@ you don't use for anything else. `uninstall.sh` removes every grant it made.
 
 ## Status
 
-Early. The read path is implemented and validated against a real library.
+The read path is complete and validated against a real library.
 
 - [x] protobuf decode of note bodies
 - [x] Markdown rendering (headings, lists, checklists, emphasis, links)
-- [ ] SQLite index reader (titles, folders, UUIDs, timestamps)
+- [x] SQLite index reader (titles, folders, UUIDs, timestamps)
+- [x] `notes` CLI: list, folders, show, decode
 - [ ] write path via Apple Events
 - [ ] `notesd` HTTP+JSON daemon and LaunchAgent
 - [ ] installer / TCC grants
 - [ ] Linux TUI and Omarchy bar client
+
+## Usage
+
+```
+notes list [-folder NAME] [-deleted]   list notes, newest first
+notes folders                          list folders
+notes show <uuid>                      print one note as Markdown
+notes decode                           decode a raw ZICNOTEDATA blob on stdin
+```
+
+`show` takes the `ZIDENTIFIER` UUID that `list` prints. Notes in Recently
+Deleted are hidden unless you ask for them, by either route into the trash --
+the deletion flag, or simply living in that folder. Password-protected notes
+are listed and flagged but their bodies are not readable.
+
+Reads are strictly read-only: the database is opened `mode=ro` and nothing in
+this tool writes to Notes or to iCloud.
 
 ## Prior art
 
