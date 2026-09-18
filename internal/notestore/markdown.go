@@ -40,6 +40,12 @@ func (n *Note) Markdown() string {
 	counters := map[int]int{}
 	var monoBuf []string
 	inMono := false
+	// Blank lines between monospaced paragraphs are held rather than ending the
+	// block. Notes puts an unstyled empty line between paragraphs, so closing on
+	// one gave every paragraph its own fence -- a note of forty names came back
+	// as forty separate code blocks, which is unreadable and nothing like what
+	// the note looks like in Notes.
+	var pendingBlanks []string
 
 	// The fence is sized to the content so a paragraph that itself contains
 	// backtick fences cannot break out of its own block.
@@ -65,10 +71,20 @@ func (n *Note) Markdown() string {
 		// emitted verbatim -- escaping inside a fence would be visible.
 		if style == StyleMonospace {
 			inMono = true
+			monoBuf = append(monoBuf, pendingBlanks...)
+			pendingBlanks = nil
 			monoBuf = append(monoBuf, body)
 			continue
 		}
+		if blank && inMono {
+			// Held: if more monospaced text follows, this belongs inside the
+			// block; if it does not, it is emitted after the closing fence.
+			pendingBlanks = append(pendingBlanks, body)
+			continue
+		}
 		closeMono()
+		out = append(out, pendingBlanks...)
+		pendingBlanks = nil
 
 		if blank {
 			// A blank line does not end a numbered list in Notes, so the
@@ -136,6 +152,7 @@ func (n *Note) Markdown() string {
 		out = append(out, prefix+body)
 	}
 	closeMono()
+	out = append(out, pendingBlanks...)
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
 	}

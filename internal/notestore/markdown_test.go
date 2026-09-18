@@ -176,3 +176,56 @@ func TestStylingIsNotSmearedAcrossALineSeparator(t *testing.T) {
 		t.Errorf("emphasis bled onto the next line: %q", got)
 	}
 }
+
+// Notes puts an unstyled empty line between paragraphs, and a blank line used
+// to close the fenced block. So a note of forty monospaced names came back as
+// forty separate code blocks -- seventy fence markers in one note, unreadable,
+// and nothing like what the note looks like in Notes.
+func TestConsecutiveMonospacedParagraphsAreOneBlock(t *testing.T) {
+	n := decode(t, blob("Billy\n\nEddie\n\nMark\n\nafter",
+		run(6, 0, StyleMonospace, ""),
+		run(1, 0, StyleBody, ""),
+		run(6, 0, StyleMonospace, ""),
+		run(1, 0, StyleBody, ""),
+		run(5, 0, StyleMonospace, ""),
+		run(1, 0, StyleBody, ""),
+		run(5, 0, StyleBody, "")))
+	got := n.Markdown()
+	if fences := strings.Count(got, "```"); fences != 2 {
+		t.Errorf("got %d fence markers, want 2 (one block):\n%s", fences, got)
+	}
+	for _, want := range []string{"Billy", "Eddie", "Mark", "after"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lost %q:\n%s", want, got)
+		}
+	}
+	// The text that follows the block must be outside it.
+	if i, j := strings.LastIndex(got, "```"), strings.Index(got, "after"); i > j {
+		t.Errorf("the following line was swallowed into the block:\n%s", got)
+	}
+}
+
+// A blank line that is not between two monospaced paragraphs is still a blank
+// line, and must not be moved inside the block or dropped.
+func TestABlankAfterAMonospacedBlockStaysOutside(t *testing.T) {
+	n := decode(t, blob("code\n\nprose",
+		run(5, 0, StyleMonospace, ""),
+		run(1, 0, StyleBody, ""),
+		run(5, 0, StyleBody, "")))
+	got := n.Markdown()
+	lines := strings.Split(got, "\n")
+	var closing int
+	for i, l := range lines {
+		if strings.HasPrefix(l, "```") {
+			closing = i
+		}
+	}
+	if !strings.Contains(got, "prose") {
+		t.Fatalf("lost the prose line:\n%s", got)
+	}
+	for i := 0; i < closing; i++ {
+		if strings.Contains(lines[i], "prose") {
+			t.Errorf("prose ended up inside the block:\n%s", got)
+		}
+	}
+}
