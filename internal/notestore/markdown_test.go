@@ -114,3 +114,65 @@ func TestDashListGetsItsOwnMarker(t *testing.T) {
 		t.Errorf("dot list rendered %q, want %q", got, "- text")
 	}
 }
+
+// Notes does not only break lines with U+000A.
+//
+// A line entered with shift-return, and most text pasted in from elsewhere, is
+// separated by U+2028 LINE SEPARATOR, which Notes renders as a line break like
+// any other. Splitting on "\n" alone turned a real twenty-five line order of
+// service into three lines of run-on text -- it read as one paragraph with
+// bullet characters scattered through it, while the same note on an iPhone was
+// a clean list.
+func TestUnicodeLineSeparatorsBreakLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sep  string
+	}{
+		{"newline", "\n"},
+		{"line separator", " "},
+		{"paragraph separator", " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "first" + tc.sep + "second" + tc.sep + "third"
+			n := decode(t, blob(text, run(len([]rune(text)), 0, StyleBody, "")))
+			got := n.Markdown()
+			if lines := strings.Split(strings.TrimSpace(got), "\n"); len(lines) != 3 {
+				t.Errorf("got %d lines, want 3: %q", len(lines), got)
+			}
+			for _, want := range []string{"first", "second", "third"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("lost %q: %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+// The title is the first line, by whichever separator ends it -- every one of
+// them, not just the common one. A note whose first break is U+2029 would
+// otherwise be named after its entire contents.
+func TestTitleStopsAtAUnicodeLineSeparator(t *testing.T) {
+	for _, sep := range []string{"\n", "\u2028", "\u2029"} {
+		text := "Order of worship" + sep + "\u00a0\u00a0\u2022 Call to worship"
+		n := decode(t, blob(text, run(len([]rune(text)), 0, StyleBody, "")))
+		if got := n.Title(); got != "Order of worship" {
+			t.Errorf("separator %q: Title() = %q, want %q", sep, got, "Order of worship")
+		}
+	}
+}
+
+// Styling has to follow the text across the new separators, or a run that
+// spans one bleeds its formatting into the line below.
+func TestStylingIsNotSmearedAcrossALineSeparator(t *testing.T) {
+	text := "bold here plain here"
+	n := decode(t, blob(text,
+		run(len([]rune("bold here ")), FontBold, StyleBody, ""),
+		run(len([]rune("plain here")), 0, StyleBody, "")))
+	got := n.Markdown()
+	if !strings.Contains(got, "**bold here**") {
+		t.Errorf("the bold line lost its emphasis: %q", got)
+	}
+	if strings.Contains(got, "**plain here**") {
+		t.Errorf("emphasis bled onto the next line: %q", got)
+	}
+}

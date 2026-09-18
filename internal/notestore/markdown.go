@@ -142,13 +142,34 @@ func (n *Note) Markdown() string {
 	return strings.Join(out, "\n")
 }
 
+// isLineBreak reports whether a UTF-16 unit ends a line in a Notes body.
+//
+// Notes does not only use U+000A. A line entered with shift-return, and most
+// text pasted from elsewhere, is separated by U+2028 LINE SEPARATOR, which
+// Notes renders as a line break exactly like a newline. Splitting on "\n"
+// alone turned a twenty-five line order of service into three lines of run-on
+// text with the bullets still in it.
+//
+// U+2029 PARAGRAPH SEPARATOR is included for the same reason; both are single
+// UTF-16 units, so this is a comparison rather than a decode.
+func isLineBreak(u uint16) bool {
+	return u == '\n' || u == 0x2028 || u == 0x2029
+}
+
+// splitLines breaks note text on every separator Notes treats as a line break.
+func splitLines(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == '\n' || r == 0x2028 || r == 0x2029
+	})
+}
+
 // PlainText returns the note body with no styling, which is what search and
 // previews want.
 func (n *Note) PlainText() string { return n.Text }
 
 // Title is the first non-empty line, matching how Notes derives a note's name.
 func (n *Note) Title() string {
-	for _, l := range strings.Split(n.Text, "\n") {
+	for _, l := range splitLines(n.Text) {
 		if s := strings.TrimSpace(l); s != "" {
 			return s
 		}
@@ -240,14 +261,14 @@ func (n *Note) lines(units []uint16) []line {
 	appendChunk := func(chunk []uint16, r *AttributeRun) {
 		allNewlines := true
 		for _, u := range chunk {
-			if u != '\n' {
+			if !isLineBreak(u) {
 				allNewlines = false
 				break
 			}
 		}
 		start := 0
 		for j := 0; j <= len(chunk); j++ {
-			if j == len(chunk) || chunk[j] == '\n' {
+			if j == len(chunk) || isLineBreak(chunk[j]) {
 				// Attach when the run contributes characters to this line, or
 				// when we are sitting on a newline that is the run's entire
 				// contribution. The second clause must not fire on the final
