@@ -649,18 +649,23 @@ func (n *Note) Destroys() []string {
 // Degrades reports formatting a Markdown rewrite would flatten. Every character
 // survives; only its appearance changes.
 //
-// This is deliberately not grounds for refusing a write. Underline in
-// particular rides along with hyperlinks -- a quarter of the link runs in a
-// real library carry it -- so treating it as fatal would make most notes
-// containing a link unwritable.
+// This is deliberately not grounds for refusing a write.
+//
+// What belongs here was measured against Notes rather than assumed, by writing
+// each construct as HTML and decoding what came back. Anything Notes accepts is
+// not a degrade, it is a conversion to get right -- see ToHTML.
+//
+// Underlining is deliberately absent. Notes draws hyperlinks underlined and
+// stores that as a real attribute on the run, so nearly every note containing a
+// link carried the warning, while the link comes back underlined anyway because
+// Notes underlines it again. Reporting it trained the reader to ignore the
+// banner, which is worse than not reporting it: the warnings that matter are
+// the ones nobody reads past.
 func (n *Note) Degrades() []string {
 	var out []string
 	add := adder(&out)
 	for i := range n.Runs {
 		r := &n.Runs[i]
-		if r.Underlined {
-			add("underlining")
-		}
 		if r.Superscript != 0 {
 			add("superscript or subscript")
 		}
@@ -677,7 +682,11 @@ func (n *Note) Degrades() []string {
 		if ps.BlockQuote != 0 {
 			add("block quotes")
 		}
-		if ps.IndentAmount > 0 {
+		// A nested list survives now: ToHTML emits real nested <ul>/<ol>, and
+		// Notes stores the indent back. Indentation on an ordinary paragraph
+		// still does not -- margin-left is discarded outright -- so the warning
+		// is kept for exactly that case.
+		if ps.IndentAmount > 0 && !isListStyle(ps.StyleType) {
 			add("indentation")
 		}
 		if ps.Alignment != 0 {
@@ -685,6 +694,16 @@ func (n *Note) Degrades() []string {
 		}
 	}
 	return out
+}
+
+// isListStyle reports whether a paragraph style is one of Notes' list kinds,
+// whose indentation round-trips as list nesting.
+func isListStyle(t int) bool {
+	switch t {
+	case StyleDotList, StyleDashList, StyleNumList, StyleChecklist:
+		return true
+	}
+	return false
 }
 
 func adder(out *[]string) func(string) {

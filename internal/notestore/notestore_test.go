@@ -537,9 +537,11 @@ func TestDegradesDetectsFormattingLoss(t *testing.T) {
 	}{
 		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
 		{"monospace", [][]byte{run(4, 0, StyleMonospace, "")}, "monospaced paragraphs"},
-		{"indent", [][]byte{runIndent(4, StyleDotList, 1)}, "indentation"},
 		{"block quote", [][]byte{runQuote(4)}, "block quotes"},
-		{"underline", [][]byte{runUnderline(4)}, "underlining"},
+		// Indentation degrades only where it is really lost. A list keeps its
+		// nesting through a rewrite now; an ordinary paragraph does not,
+		// because Notes discards margin-left.
+		{"indent on a paragraph", [][]byte{runIndent(4, StyleBody, 1)}, "indentation"},
 	} {
 		if got := decode(t, blob("text", tc.runs...)).Degrades(); !contains(got, tc.want) {
 			t.Errorf("%s: got %v, want it to include %q", tc.name, got, tc.want)

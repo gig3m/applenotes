@@ -41,29 +41,11 @@ func ToHTML(md string) string {
 	}
 	lines := strings.Split(md, "\n")
 
-	listKind := "" // "ul", "ol", or ""
+	lists := &listWriter{b: &b}
 	inFence := false
 	fence := ""
 
-	closeList := func() {
-		if listKind != "" {
-			fmt.Fprintf(&b, "</%s>", listKind)
-			listKind = ""
-		}
-	}
-	openList := func(kind string) {
-		if listKind == kind {
-			return
-		}
-		if listKind != "" {
-			closeList()
-			// Two lists in a row are merged by Notes unless something
-			// separates them.
-			b.WriteString("<div><br></div>")
-		}
-		fmt.Fprintf(&b, "<%s>", kind)
-		listKind = kind
-	}
+	closeList := func() { lists.closeAll() }
 
 	for _, raw := range lines {
 		// Only the line terminator is removed here. The block patterns below
@@ -125,7 +107,6 @@ func ToHTML(md string) string {
 		}
 
 		if m := bulletRe.FindStringSubmatch(trimmed); m != nil {
-			openList("ul")
 			text := m[2]
 			// Notes cannot be given a checklist through HTML, so a task item
 			// degrades to a bullet carrying its box as text rather than
@@ -137,13 +118,12 @@ func ToHTML(md string) string {
 				}
 				text = mark + c[2]
 			}
-			fmt.Fprintf(&b, "<li>%s</li>", inline(text))
+			lists.item(listDepth(raw), "ul", inline(text))
 			continue
 		}
 
 		if m := numberRe.FindStringSubmatch(trimmed); m != nil {
-			openList("ol")
-			fmt.Fprintf(&b, "<li>%s</li>", inline(m[1]))
+			lists.item(listDepth(raw), "ol", inline(m[1]))
 			continue
 		}
 
@@ -477,4 +457,94 @@ func emphasis(s string) string {
 	s = italicRe.ReplaceAllString(s, "$1$3<i>$2$4</i>")
 	s = strikeRe.ReplaceAllString(s, "<s>$1</s>")
 	return s
+}
+
+// listWriter emits nested lists in the one shape Notes accepts.
+//
+// Measured against Notes on macOS rather than assumed: a nested <ul> inside the
+// <li> it hangs off comes back with IndentAmount set, while margin-left on a
+// flat <li> is discarded outright and the item lands at the top level. So the
+// parent's </li> has to be held open until its child list closes, which is why
+// this keeps a stack instead of writing each item whole.
+type listWriter struct {
+	b     *strings.Builder
+	kinds []string // "ul" or "ol" for each open level
+	open  []bool   // whether an <li> is still open at that level
+}
+
+// item writes one list item at the given depth, opening and closing whatever
+// levels that implies.
+func (w *listWriter) item(depth int, kind, html string) {
+	for len(w.kinds) > depth+1 {
+		w.closeLevel()
+	}
+	// A bullet where a numbered list was, at the same depth, is a different
+	// list rather than a continuation of this one.
+	if len(w.kinds) == depth+1 && w.kinds[depth] != kind {
+		w.closeLevel()
+		if depth == 0 {
+			// Notes merges two adjacent top-level lists unless something
+			// separates them.
+			w.b.WriteString("<div><br></div>")
+		}
+	}
+	for len(w.kinds) < depth+1 {
+		// A deeper list has to sit inside an <li>. Text indented under nothing
+		// -- a list that starts indented, or a jump of two levels -- has no
+		// parent item to nest in, so one is opened to hold it.
+		if n := len(w.kinds); n > 0 && !w.open[n-1] {
+			w.b.WriteString("<li>")
+			w.open[n-1] = true
+		}
+		fmt.Fprintf(w.b, "<%s>", kind)
+		w.kinds = append(w.kinds, kind)
+		w.open = append(w.open, false)
+	}
+	if w.open[depth] {
+		w.b.WriteString("</li>")
+		w.open[depth] = false
+	}
+	fmt.Fprintf(w.b, "<li>%s", html)
+	w.open[depth] = true
+}
+
+func (w *listWriter) closeLevel() {
+	d := len(w.kinds) - 1
+	if d < 0 {
+		return
+	}
+	if w.open[d] {
+		w.b.WriteString("</li>")
+		w.open[d] = false
+	}
+	fmt.Fprintf(w.b, "</%s>", w.kinds[d])
+	w.kinds = w.kinds[:d]
+	w.open = w.open[:d]
+	// The <li> hosting this list stays open: the next item at that level, or
+	// closing that level, writes its </li>.
+}
+
+func (w *listWriter) closeAll() {
+	for len(w.kinds) > 0 {
+		w.closeLevel()
+	}
+}
+
+// listDepth reads the nesting level off a line's leading whitespace. The
+// Markdown this round-trips against is written by Markdown(), which indents
+// four spaces per level; a tab counts as one level so hand-written notes work
+// too.
+func listDepth(line string) int {
+	cols := 0
+	for _, r := range line {
+		switch r {
+		case ' ':
+			cols++
+		case '\t':
+			cols += 4
+		default:
+			return cols / 4
+		}
+	}
+	return cols / 4
 }

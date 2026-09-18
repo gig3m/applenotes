@@ -89,3 +89,41 @@ the first has caught four.
    threaded in as a parameter that was never read. Go does not flag that.
 8. **Is the error message true?** A warning said "No text is lost" while the
    path it described was reflowing code blocks.
+
+## What Notes accepts through HTML (measured 2026-09-18)
+
+Writes go in as HTML through Apple Events. What Notes does with that HTML was
+measured by writing each construct to a throwaway note on a real Mac and
+decoding the stored runs back with `notes decode -raw`. Do not extend the
+converter from guesses -- most of these are not what you would predict.
+
+| written as | stored as | usable |
+|---|---|---|
+| `<ul><li>a<ul><li>b</li></ul></li></ul>` | `bullet`, `bullet indent=1` | **yes**, any depth |
+| `<ol>` nested the same way | `numbered`, `numbered indent=1` | **yes** |
+| `<li style="margin-left:40px">` | indent discarded, item lands at top level | no |
+| `<ul class=Apple-dash-list>` | `dashed` | yes |
+| `<u>` | `underline` | yes |
+| `<sup>` / `<sub>` | `superscript` / `subscript` | yes |
+| `style="text-align:center"` / `right` | `align=1` / `align=2` | yes |
+| `<h1>` / `<h2>` | `bold pt=24` / `bold pt=18` | yes, via point size |
+| `<h3>` / `<h4>` | `bold`, no point size | no -- reads back as `**bold**` |
+| `<div style="font-family:Menlo">` | `font=Menlo-Regular pt=12` | yes, but not `monospaced` |
+| `<pre>` / `<tt>` / `<code>` | `font=Courier pt=12`, newlines collapsed | partly |
+| `class=Apple-monospace` | ignored | no |
+| `<blockquote>` | text survives, quote attribute lost | no |
+| `<input type=checkbox>` | stripped entirely, runs merge | no |
+
+So the paragraph styles Notes will not accept from HTML at all are
+**checklist**, **monospaced**, **block quote**, and **subheading** -- those are
+genuine round-trip losses, not conversion bugs. Everything above them in the
+table is the converter's job.
+
+Two traps met while measuring:
+
+- Read the database **without** `immutable=1`. That flag skips the WAL, which is
+  where Notes' recent writes live: a probe read this way showed the database
+  stuck ten notes in the past and looked exactly like Notes refusing to flush.
+  `immutable=1` is for reading a pre-write snapshot on purpose, nothing else.
+- Notes buffers for well over a minute. A note created by Apple Events is
+  visible to AppleScript immediately and absent from the database long after.

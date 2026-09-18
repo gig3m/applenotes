@@ -396,3 +396,91 @@ func TestTrailingWhitespaceLineIsNotAParagraph(t *testing.T) {
 		t.Errorf("got %q want %q", got, want)
 	}
 }
+
+// Nested lists were flattened on the way out: ToHTML matched against the
+// trimmed line and emitted every item at the top level, so "1. Heb 7" under
+// item 1 came back as item 2 and everything below it renumbered.
+//
+// The shape asserted here is not a matter of taste. Notes was measured: a
+// nested <ul> inside the <li> it hangs off comes back with IndentAmount set,
+// while margin-left on a flat <li> is discarded and the item lands at the top
+// level. So the nesting has to be structural, and the parent <li> has to stay
+// open across its child.
+func TestNestedListsSurvive(t *testing.T) {
+	for _, tc := range []struct{ name, md, want string }{
+		{"a nested bullet stays inside its parent item",
+			"- top\n    - nested\n- second",
+			"<ul><li>top<ul><li>nested</li></ul></li><li>second</li></ul>"},
+		{"numbering nests the same way",
+			"1. one\n    1. one-a\n2. two",
+			"<ol><li>one<ol><li>one-a</li></ol></li><li>two</li></ol>"},
+		{"three levels",
+			"- a\n    - b\n        - c\n- back",
+			"<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>back</li></ul>"},
+		{"a tab is one level, for notes written by hand",
+			"- top\n\t- tabbed",
+			"<ul><li>top<ul><li>tabbed</li></ul></li></ul>"},
+		// Notes merges two adjacent top-level lists unless something separates
+		// them, so a bullet list followed by a numbered one needs the break.
+		{"changing list kind at the top level still separates",
+			"- bullet\n1. number",
+			"<ul><li>bullet</li></ul><div><br></div><ol><li>number</li></ol>"},
+		// Indented with nothing above it: there is no parent item to nest in,
+		// so one is opened rather than dropping the indent or emitting
+		// unbalanced tags.
+		{"a list that starts indented",
+			"    - starts indented",
+			"<ul><li><ul><li>starts indented</li></ul></li></ul>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ToHTML(tc.md); got != tc.want {
+				t.Errorf("ToHTML(%q) =\n  %s\nwant\n  %s", tc.md, got, tc.want)
+			}
+		})
+	}
+}
+
+// Whatever the nesting, the tags have to balance: Notes given unbalanced HTML
+// silently drops content rather than reporting it.
+func TestNestedListTagsAlwaysBalance(t *testing.T) {
+	for _, md := range []string{
+		"- a\n    - b",
+		"- a\n        - deep jump\n- back",
+		"    - indented first\n- then top",
+		"1. a\n    - mixed\n2. b",
+		"- a\n\n    - after a blank line",
+		"- a\n    - b\ntext after",
+		"- a\n    - b\n# heading after",
+		"1. a\n    1. b\n        1. c\n    1. d\n1. e",
+	} {
+		got := ToHTML(md)
+		for _, tag := range []string{"ul", "ol", "li"} {
+			o := strings.Count(got, "<"+tag+">")
+			c := strings.Count(got, "</"+tag+">")
+			if o != c {
+				t.Errorf("ToHTML(%q): %d <%s> vs %d </%s>\n  %s", md, o, tag, c, tag, got)
+			}
+		}
+	}
+}
+
+// The reader indents four spaces per level, so the writer has to read four
+// spaces back as one level or the round trip loses a level every pass.
+func TestListDepthMatchesWhatMarkdownWrites(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want int
+	}{
+		{"- x", 0},
+		{"    - x", 1},
+		{"        - x", 2},
+		{"\t- x", 1},
+		{"\t\t- x", 2},
+		{"  - x", 0},     // two spaces is not a level
+		{"      - x", 1}, // six spaces is one level and a stray space
+	} {
+		if got := listDepth(tc.line); got != tc.want {
+			t.Errorf("listDepth(%q) = %d, want %d", tc.line, got, tc.want)
+		}
+	}
+}

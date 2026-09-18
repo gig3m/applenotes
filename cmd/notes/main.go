@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf16"
 
 	"github.com/gig3m/applenotes/internal/notesapp"
 	"github.com/gig3m/applenotes/internal/notestore"
@@ -64,6 +65,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	server := fs.String("server", os.Getenv("NOTESD_URL"), "notesd URL; reads and writes go over HTTP instead of the local database")
 	token := fs.String("token", "", "bearer token for -server (default: $NOTESD_TOKEN, or ~/.config/applenotes/token)")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
+	rawRuns := fs.Bool("raw", false, "decode: dump the attribute runs instead of Markdown")
 	rest := args[1:]
 	if permutable[cmd] {
 		var err error
@@ -208,7 +210,7 @@ The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
 		if fs.NArg() > 0 {
 			return usageErr("decode reads from stdin and takes no arguments")
 		}
-		err = decode(stdin, stdout)
+		err = decode(stdin, stdout, *rawRuns)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
@@ -236,7 +238,7 @@ commands:
   capture [text…]                  make a note from one line, or from stdin
   bar                              one line of JSON for a status bar
   rm <uuid>                        move a note to Recently Deleted
-  decode                           decode a raw ZICNOTEDATA blob on stdin
+  decode [-raw]                    decode a raw ZICNOTEDATA blob on stdin
 
 environment:
   NOTES_EDITOR   editor for 'edit'. Falls back to $VISUAL, then $EDITOR, then
@@ -467,7 +469,7 @@ func rmNote(stderr io.Writer, path, uuid string) error {
 	return nil
 }
 
-func decode(r io.Reader, stdout io.Writer) error {
+func decode(r io.Reader, stdout io.Writer, raw bool) error {
 	blob, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -476,8 +478,120 @@ func decode(r io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, n.Markdown())
+	if !raw {
+		fmt.Fprintln(stdout, n.Markdown())
+		return nil
+	}
+	// The run dump exists to answer "what did Notes actually store?" -- the
+	// Markdown cannot say, because anything Markdown has no syntax for is
+	// exactly what is missing from it. Conversion work is guesswork without it.
+	fmt.Fprintf(stdout, "text: %d UTF-16 units, %d runs\n\n", utf16Len(n.Text), len(n.Runs))
+	at := 0
+	for i := range n.Runs {
+		r := &n.Runs[i]
+		fmt.Fprintf(stdout, "run %-3d len=%-5d %s\n", i, r.Length, runSummary(r))
+		fmt.Fprintf(stdout, "        %q\n", utf16Slice(n.Text, at, r.Length))
+		at += r.Length
+	}
 	return nil
+}
+
+func runSummary(r *notestore.AttributeRun) string {
+	var f []string
+	switch r.FontWeight {
+	case 1:
+		f = append(f, "bold")
+	case 2:
+		f = append(f, "italic")
+	case 3:
+		f = append(f, "bold+italic")
+	}
+	if r.Underlined {
+		f = append(f, "underline")
+	}
+	if r.Strikethrough {
+		f = append(f, "strike")
+	}
+	if r.Superscript > 0 {
+		f = append(f, "superscript")
+	} else if r.Superscript < 0 {
+		f = append(f, "subscript")
+	}
+	if r.Link != "" {
+		f = append(f, "link="+r.Link)
+	}
+	if r.FontName != "" {
+		f = append(f, "font="+r.FontName)
+	}
+	if r.PointSize != 0 {
+		f = append(f, fmt.Sprintf("pt=%g", r.PointSize))
+	}
+	if a := r.Attachment; a != nil {
+		f = append(f, "attachment="+a.TypeUTI)
+	}
+	if ps := r.ParagraphStyle; ps != nil {
+		f = append(f, "style="+styleName(ps.StyleType))
+		if ps.IndentAmount != 0 {
+			f = append(f, fmt.Sprintf("indent=%d", ps.IndentAmount))
+		}
+		if ps.Alignment != 0 {
+			f = append(f, fmt.Sprintf("align=%d", ps.Alignment))
+		}
+		if ps.BlockQuote != 0 {
+			f = append(f, fmt.Sprintf("quote=%d", ps.BlockQuote))
+		}
+		if ps.Checklist != nil {
+			f = append(f, "checklist")
+		}
+	}
+	if len(f) == 0 {
+		return "plain"
+	}
+	return strings.Join(f, " ")
+}
+
+// styleName names the paragraph style constants Notes uses, so a dump reads as
+// "bullet" rather than "104".
+func styleName(t int) string {
+	switch t {
+	case -1:
+		return "body"
+	case 0:
+		return "title"
+	case 1:
+		return "heading"
+	case 2:
+		return "subheading"
+	case 3:
+		return "monospaced"
+	case 100:
+		return "bullet"
+	case 101:
+		return "dashed"
+	case 102:
+		return "numbered"
+	case 103:
+		return "checklist"
+	}
+	return fmt.Sprintf("style(%d)", t)
+}
+
+func utf16Len(s string) int {
+	return len(utf16.Encode([]rune(s)))
+}
+
+// utf16Slice takes a run's span out of the text. Run lengths are UTF-16 code
+// units, so slicing by byte or rune silently misaligns on anything non-ASCII.
+func utf16Slice(s string, at, n int) string {
+	u := utf16.Encode([]rune(s))
+	if at > len(u) {
+		return ""
+	}
+	end := at + n
+	if end > len(u) {
+		end = len(u)
+	}
+	return string(utf16.Decode(u[at:end]))
 }
 
 // permute moves flags ahead of positional arguments, so that

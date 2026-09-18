@@ -315,7 +315,7 @@ func TestReadReportsWhatARewriteWouldFlatten(t *testing.T) {
 		t.Fatalf("%v: %s", err, rec.Body)
 	}
 	if len(got.Degrades) == 0 {
-		t.Error("an indented, underlined note reported nothing")
+		t.Error("a note carrying formatting a rewrite flattens reported nothing")
 	}
 }
 

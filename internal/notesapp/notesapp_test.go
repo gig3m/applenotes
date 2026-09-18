@@ -43,8 +43,8 @@ func TestAppendRefusesToDestroyContent(t *testing.T) {
 // guard and fails later, at the Apple Event.
 func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 	w := New(openFixture(t))
-	// UUID-DEGRADED is an indented, underlined note -- the exact shape that a
-	// previous version refused permanently, with no way to override it.
+	// UUID-DEGRADED carries formatting a rewrite flattens -- the exact shape
+	// that a previous version refused permanently, with no way to override it.
 	for _, uuid := range []string{"UUID-PLAIN", "UUID-DEGRADED"} {
 		var lossy *ErrLossyRewrite
 		if _, err := w.Replace(context.Background(), uuid, "new body"); errors.As(err, &lossy) {
@@ -133,7 +133,7 @@ func openFixture(t *testing.T) *notestore.Store {
 			(1, 'UUID-ATTACH', 'Has attachment', 10),
 			(2, 'UUID-PLAIN', 'Plain', 11),
 			(3, 'UUID-MISSING', 'Unreadable', 12),
-			(4, 'UUID-DEGRADED', 'Indented and underlined', 13),
+			(4, 'UUID-DEGRADED', 'An indented subheading', 13),
 			(5, 'UUID-LOCKED', 'Locked', 14)`,
 		`UPDATE ZICCLOUDSYNCINGOBJECT SET ZISPASSWORDPROTECTED = 1 WHERE Z_PK = 5`,
 		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES (6, 'FOLDER-UUID', 'A folder')`,
@@ -168,8 +168,8 @@ func openFixture(t *testing.T) *notestore.Store {
 	return s
 }
 
-// degradedBlob builds a note with indentation and underlining: formatting a
-// rewrite flattens, which must not block the write.
+// degradedBlob builds a note whose formatting a rewrite really does flatten,
+// which must not block the write.
 func degradedBlob(t *testing.T) []byte {
 	t.Helper()
 	varint := func(v uint64) []byte {
@@ -188,9 +188,11 @@ func degradedBlob(t *testing.T) []byte {
 		return append(varint(uint64(num)<<3), varint(v)...)
 	}
 
-	style := append(vfield(1, 100), vfield(4, 1)...) // dot list, indent 1
+	// A subheading, indented. Deliberately not a list and not underlining:
+	// both of those survive a rewrite now, so a fixture built from them would
+	// assert that nothing degrades while claiming to test that something does.
+	style := append(vfield(1, 2), vfield(4, 1)...) // subheading, indent 1
 	run := append(vfield(1, 4), field(2, style)...)
-	run = append(run, vfield(6, 1)...) // underlined
 	note := append(field(2, []byte("text")), field(5, run)...)
 	raw := field(2, append(vfield(2, 1), field(3, note)...))
 

@@ -91,10 +91,13 @@ func attachmentRun() []byte {
 	return append(vfield(1, 4), field(12, info)...)
 }
 
+// degradedRun carries formatting a rewrite really does flatten. Deliberately
+// not a list and not underlining: both survive a rewrite now, so a fixture
+// built from them would assert that nothing degrades while claiming to prove
+// that something does.
 func degradedRun() []byte {
-	style := append(vfield(1, 100), vfield(4, 1)...) // dot list, indented
-	run := append(vfield(1, 4), field(2, style)...)
-	return append(run, vfield(6, 1)...) // underlined
+	style := append(vfield(1, 2), vfield(4, 1)...) // subheading, indented
+	return append(vfield(1, 4), field(2, style)...)
 }
 
 func noteBlob(t *testing.T, run []byte) []byte {
