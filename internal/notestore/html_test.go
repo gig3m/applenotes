@@ -2,8 +2,10 @@ package notestore
 
 import (
 	"html"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestToHTMLBlocks(t *testing.T) {
@@ -19,7 +21,7 @@ func TestToHTMLBlocks(t *testing.T) {
 		// Notes drops <blockquote> and its text with it, so the marker is kept
 		// as literal characters instead.
 		{"quote keeps its text", "> q", "<div>&gt; q</div>"},
-		{"quote-looking text", ">= 5 is the rule", "<div>&gt; = 5 is the rule</div>"},
+		{"quote-looking text keeps its spacing", ">= 5 is the rule", "<div>&gt;= 5 is the rule</div>"},
 	} {
 		if got := ToHTML(tc.md); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
@@ -148,14 +150,19 @@ func TestIntrawordUnderscores(t *testing.T) {
 // were previously unguarded.
 func TestEscapingAtEveryCallSite(t *testing.T) {
 	for _, tc := range []struct{ name, md string }{
-		{"href", "[t](https://x.test/?a=1&b=<2>)"},
+		{"href", `[t](https://x.test/a"><script>alert(1)</script>)`},
 		{"code span", "`<script>`"},
 		{"fenced code", "```\n<script>\n```"},
 		{"link text", "[<script>](https://x.test)"},
 		{"body", "<script>"},
 	} {
-		if strings.Contains(ToHTML(tc.md), "<script>") {
-			t.Errorf("%s: unescaped: %q", tc.name, ToHTML(tc.md))
+		got := ToHTML(tc.md)
+		if strings.Contains(got, "<script>") {
+			t.Errorf("%s: unescaped: %q", tc.name, got)
+		}
+		// A destination must not be able to break out of the href attribute.
+		if strings.Contains(got, `"><`) {
+			t.Errorf("%s: attribute break-out: %q", tc.name, got)
 		}
 	}
 }
@@ -188,11 +195,40 @@ func TestToHTMLEscapesText(t *testing.T) {
 // Text the renderer escaped must come back as its literal character, so a
 // round trip does not accumulate backslashes.
 func TestToHTMLUnescapesMarkdown(t *testing.T) {
-	got := ToHTML(`\# not a heading`)
-	if !strings.Contains(got, "<div># not a heading</div>") {
-		t.Errorf("got %q", got)
+	// An escaped delimiter becomes a character reference: the emphasis
+	// patterns cannot match it, and it still renders as the character.
+	if got, want := ToHTML(`\# not a heading`), "<div>&#35; not a heading</div>"; got != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }
+
+// The renderer escapes Markdown metacharacters in note text; the converter must
+// give them back unchanged. Escaping first and unescaping last -- the previous
+// order -- deleted them outright: "snake\_case\_name" became "snakecasename".
+func TestTextSurvivesRenderThenConvert(t *testing.T) {
+	for _, text := range []string{
+		"snake_case_name", "*star*", "__dunder__", "x`y`z", "[a](b)",
+		"**", "a_b_c", "~~x~~", "# not a heading", "1986. what a year",
+		"a < b & c > d", "back\\slash", "&#32; literal", "  indented",
+	} {
+		// Build a note whose body is exactly this text, render it, convert it
+		// back, and check no character was lost.
+		md := decode(t, blob(text, run(len(utf16.Encode([]rune(text))), 0, -2, ""))).Markdown()
+		html := ToHTML(md)
+		if got := htmlToText(html); got != text {
+			t.Errorf("round trip changed %q -> md %q -> %q", text, md, got)
+		}
+	}
+}
+
+// htmlToText recovers the visible characters from the converter's output, so a
+// test can assert that nothing was dropped.
+func htmlToText(s string) string {
+	s = tagRe.ReplaceAllString(s, "")
+	return html.UnescapeString(s)
+}
+
+var tagRe = regexp.MustCompile(`<[^>]*>`)
 
 // Trailing blank lines would add an empty paragraph that the next read renders
 // back, growing the note on every round trip.

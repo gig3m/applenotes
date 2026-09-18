@@ -63,7 +63,7 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 
-	if deadlineCtx.Err() == context.DeadlineExceeded {
+	if err != nil && deadlineCtx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("applescript: timed out after %s; the change may still have been applied, since Notes.app has already received the event (a consent dialog may also be waiting on the Mac's screen)", Timeout)
 	}
 	if err != nil {

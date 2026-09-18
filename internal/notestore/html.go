@@ -26,7 +26,7 @@ func ToHTML(md string) string {
 	// NUL and other C0 controls cannot travel in argv -- os/exec rejects an
 	// argument containing NUL outright -- and none of them are note content.
 	md = strings.Map(func(r rune) rune {
-		if r == 0 || (r < 0x20 && r != '\n' && r != '\t') {
+		if r == 0 || (r < 0x20 && r != '\n' && r != '\t' && r != '\r') {
 			return -1
 		}
 		return r
@@ -104,7 +104,7 @@ func ToHTML(md string) string {
 			// Notes drops <blockquote> entirely, taking the text with it, so
 			// the marker is kept as literal text instead. This also protects an
 			// ordinary line like ">= 5" that merely looks like a quote.
-			fmt.Fprintf(&b, "<div>&gt; %s</div>", inline(m[1]))
+			fmt.Fprintf(&b, "<div>%s</div>", inline(trimmed))
 			continue
 		}
 
@@ -132,7 +132,15 @@ func ToHTML(md string) string {
 		}
 
 		closeList()
-		fmt.Fprintf(&b, "<div>%s</div>", inline(trimmed))
+		// Leading whitespace is content, but HTML collapses it, so it is
+		// emitted as character references.
+		body := strings.TrimRight(line, " \t\r\n")
+		lead := body[:len(body)-len(strings.TrimLeft(body, " \t"))]
+		var indent strings.Builder
+		for _, r := range lead {
+			fmt.Fprintf(&indent, "&#%d;", r)
+		}
+		fmt.Fprintf(&b, "<div>%s%s</div>", indent.String(), inline(strings.TrimLeft(body, " \t")))
 	}
 	closeList()
 	out := b.String()
@@ -166,32 +174,63 @@ var (
 
 // inline converts a line's inline Markdown to HTML.
 //
-// Links are resolved first and code spans second, each by splitting the string
-// rather than substituting placeholders. An earlier version reserved sentinel
-// strings in the text; note content could contain the sentinel, and a code span
-// inside link text left one behind unreplaced.
+// The line is escaped once, up front, by escapeInline -- which also resolves
+// Markdown backslash escapes into character references. Everything downstream
+// therefore works on already-escaped text and never escapes again. An earlier
+// version escaped first and unescaped last, so the emphasis patterns never saw
+// the backslashes and silently deleted the characters they were protecting.
 func inline(s string) string {
+	return inlineEscaped(escapeInline(s))
+}
+
+// inlineEscaped resolves code spans and links, in that order of precedence.
+// Code spans win: CommonMark gives them precedence over links, so a link
+// written inside backticks is literal text.
+func inlineEscaped(s string) string {
 	var b strings.Builder
 	for {
-		loc := linkRe.FindStringSubmatchIndex(s)
-		if loc == nil {
-			break
+		code := findCodeSpan(s)
+		link := linkRe.FindStringSubmatchIndex(s)
+		switch {
+		case code == nil && link == nil:
+			b.WriteString(emphasis(s))
+			return b.String()
+		case link == nil || (code != nil && code[0] < link[0]):
+			b.WriteString(emphasis(s[:code[0]]))
+			body := strings.TrimSuffix(strings.TrimPrefix(s[code[1]:code[2]], " "), " ")
+			b.WriteString(`<font face="Menlo">` + body + "</font>")
+			s = s[code[3]:]
+		default:
+			text := s[link[2]:link[3]]
+			dest, rest, ok := splitDestination(s[link[1]:])
+			if !ok {
+				b.WriteString(emphasis(s[:link[0]+1]))
+				s = s[link[0]+1:]
+				continue
+			}
+			b.WriteString(emphasis(s[:link[0]]))
+			b.WriteString(renderLink(text, dest))
+			s = rest
 		}
-		text := s[loc[2]:loc[3]]
-		dest, rest, ok := splitDestination(s[loc[1]:])
-		if !ok {
-			// Not a link after all: emit the "[" and carry on from just after
-			// it so the rest of the line is still processed.
-			b.WriteString(inlineNoLinks(s[:loc[0]+1]))
-			s = s[loc[0]+1:]
-			continue
-		}
-		b.WriteString(inlineNoLinks(s[:loc[0]]))
-		b.WriteString(renderLink(text, dest))
-		s = rest
 	}
-	b.WriteString(inlineNoLinks(s))
-	return b.String()
+}
+
+// findCodeSpan locates the next code span, returning the offsets of the opening
+// run, the body, and the end of the closing run. Backtick runs must match in
+// length, per CommonMark.
+func findCodeSpan(s string) []int {
+	open := codeRe.FindStringIndex(s)
+	if open == nil {
+		return nil
+	}
+	ticks := s[open[0]:open[1]]
+	after := s[open[1]:]
+	for _, m := range codeRe.FindAllStringIndex(after, -1) {
+		if after[m[0]:m[1]] == ticks {
+			return []int{open[0], open[1], open[1] + m[0], open[1] + m[1]}
+		}
+	}
+	return nil // an unmatched backtick is literal text
 }
 
 // splitDestination reads a link destination up to its matching close paren,
@@ -199,9 +238,9 @@ func inline(s string) string {
 func splitDestination(s string) (dest, rest string, ok bool) {
 	// An angle-bracketed destination runs to its closing bracket and may
 	// contain anything, including spaces.
-	if strings.HasPrefix(s, "<") {
-		if end := strings.Index(s, ">"); end >= 0 && end+1 < len(s) && s[end+1] == ')' {
-			return s[:end+1], s[end+2:], true
+	if strings.HasPrefix(s, "&lt;") {
+		if end := strings.Index(s, "&gt;"); end >= 0 && end+4 < len(s) && s[end+4] == ')' {
+			return s[4:end], s[end+5:], true
 		}
 		return "", "", false
 	}
@@ -223,62 +262,88 @@ func splitDestination(s string) (dest, rest string, ok bool) {
 }
 
 func renderLink(text, dest string) string {
-	label := inlineNoLinks(text)
-	// The renderer wraps a destination containing parens or whitespace in angle
-	// brackets, per CommonMark. Unwrap it so such a link survives a round trip.
-	if strings.HasPrefix(dest, "<") && strings.HasSuffix(dest, ">") {
-		dest = dest[1 : len(dest)-1]
-	}
-	dest = unescapeMarkdown(dest)
+	label := inlineEscaped(text)
 	for _, scheme := range allowedSchemes {
 		if strings.HasPrefix(strings.ToLower(dest), scheme) {
-			return "<a href=\"" + html.EscapeString(dest) + "\">" + label + "</a>"
+			return `<a href="` + dest + `">` + label + "</a>"
 		}
 	}
 	// An unrecognised scheme -- javascript:, data:, or a bare word -- is not
 	// made clickable. The text is preserved so nothing is lost.
-	return label + " (" + html.EscapeString(dest) + ")"
+	return label + " (" + dest + ")"
 }
 
-// inlineNoLinks handles everything except links: code spans are split out so
-// their contents are never read as emphasis, then escaped and emitted verbatim.
-func inlineNoLinks(s string) string {
+// escapeInline HTML-escapes a line and resolves Markdown backslash escapes in
+// the same pass. An escaped delimiter becomes a character reference, so the
+// emphasis patterns below cannot match it and the character still renders.
+func escapeInline(s string) string {
 	var b strings.Builder
-	for {
-		open := codeRe.FindStringIndex(s)
-		if open == nil {
-			break
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) && isMarkdownPunct(s[i+1]) {
+			i++
+			fmt.Fprintf(&b, "&#%d;", s[i])
+			continue
 		}
-		ticks := s[open[0]:open[1]]
-		after := s[open[1]:]
-		closeIdx := -1
-		for _, m := range codeRe.FindAllStringIndex(after, -1) {
-			if after[m[0]:m[1]] == ticks {
-				closeIdx = m[0]
-				break
+		switch c {
+		case '&':
+			// A character reference the renderer emitted -- &#32; for an
+			// indent, say -- is passed through so it still renders.
+			if n := entityLen(s[i:]); n > 0 {
+				b.WriteString(s[i : i+n])
+				i += n - 1
+				continue
 			}
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		case '"':
+			b.WriteString("&#34;")
+		case '\'':
+			b.WriteString("&#39;")
+		default:
+			b.WriteByte(c)
 		}
-		if closeIdx < 0 {
-			break // an unmatched backtick is literal text
-		}
-		b.WriteString(emphasis(s[:open[0]]))
-		body := after[:closeIdx]
-		body = strings.TrimPrefix(body, " ")
-		body = strings.TrimSuffix(body, " ")
-		b.WriteString("<font face=\"Menlo\">" + html.EscapeString(body) + "</font>")
-		s = after[closeIdx+len(ticks):]
 	}
-	b.WriteString(emphasis(s))
 	return b.String()
 }
 
+func isMarkdownPunct(c byte) bool {
+	return strings.IndexByte("\\`*_[]<>~#+-.!()&{}|\"'", c) >= 0
+}
+
+// entityLen returns the length of a character reference at the start of s, or 0.
+func entityLen(s string) int {
+	if !strings.HasPrefix(s, "&") {
+		return 0
+	}
+	for i := 1; i < len(s) && i < 34; i++ {
+		c := s[i]
+		if c == ';' {
+			if i == 1 {
+				return 0
+			}
+			return i + 1
+		}
+		if c == '#' && i == 1 {
+			continue
+		}
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return 0
+		}
+	}
+	return 0
+}
+
 func emphasis(s string) string {
-	s = html.EscapeString(s)
 	s = strongRe.ReplaceAllString(s, "<b><i>$1$2</i></b>")
 	s = boldRe.ReplaceAllString(s, "$2<b>$1$3</b>")
 	s = italicRe.ReplaceAllString(s, "$1$3<i>$2$4</i>")
 	s = strikeRe.ReplaceAllString(s, "<s>$1</s>")
-	return unescapeMarkdown(s)
+	return s
 }
 
 // unescapeMarkdown turns backslash escapes back into their literal character,

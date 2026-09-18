@@ -140,12 +140,18 @@ is not observable through the read path for an unbounded period, so:
   write, so it cannot be used to confirm one — only to notice changes made on
   other devices, once Notes gets around to persisting them.
 
-`append` reads the existing body from SQLite and rewrites the whole note, rather
-than concatenating through AppleScript — reading a body through AppleScript
-drops every hyperlink in it, so the obvious implementation would silently
-destroy links in the note being appended to. Because the read comes from the
-database, `append` works from the note as last persisted; see the section
-above.
+There is no non-destructive way to append. Notes offers no append verb, so the
+note must be rewritten whole, and both routes to its existing body lose
+something: reading through AppleScript drops every hyperlink, and rewriting from
+Markdown drops anything Markdown cannot express.
+
+So `append` reads the body from SQLite, which keeps links, and **refuses**
+rather than damaging a note that holds attachments, checklists, block quotes,
+subheadings or nested lists. Add to those in Notes.app instead.
+
+Two caveats apply even when it succeeds: the read comes from the database, so an
+edit still buffered in Notes.app is not merely missed but **overwritten**; and
+Markdown metacharacters in the existing prose are re-escaped on the way through.
 
 `show` takes the `ZIDENTIFIER` UUID that `list` prints. Notes in Recently
 Deleted are hidden unless you ask for them, by any of the three routes into the

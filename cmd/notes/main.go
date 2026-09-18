@@ -256,7 +256,15 @@ func appendNote(path, uuid string) error {
 		return err
 	}
 	defer s.Close()
-	if err := w.Append(context.Background(), uuid, string(md)); err != nil {
+
+	err = w.Append(context.Background(), uuid, string(md))
+	var lossy *notesapp.ErrLossyRewrite
+	if errors.As(err, &lossy) {
+		return fmt.Errorf("%w.\n"+
+			"       Appending rewrites the whole note, and that content cannot\n"+
+			"       survive the trip. Add to this note in Notes.app instead", err)
+	}
+	if err != nil {
 		return err
 	}
 	warnLag()

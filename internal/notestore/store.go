@@ -305,14 +305,15 @@ func (s *Store) ScriptID(uuid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The same predicate Meta and Body use. ZICCLOUDSYNCINGOBJECT holds
-	// folders and accounts too, so without it a folder UUID would be formatted
-	// as a note id and handed to AppleScript.
+	// ZICCLOUDSYNCINGOBJECT holds folders and accounts too, so a note must be
+	// identified as one -- otherwise a folder UUID would be formatted as a note
+	// id and handed to AppleScript. Unlike Meta and Body this does not require
+	// the body to be readable, so a locked note can still be addressed.
 	var pk int64
 	err = s.db.QueryRow(`
 		SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT n
 		WHERE n.ZIDENTIFIER = ?
-		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
+		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK)
 		ORDER BY Z_PK LIMIT 1`, uuid).Scan(&pk)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound

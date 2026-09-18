@@ -330,9 +330,9 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		// Consecutive spans sharing a link are one link. They are often split
 		// because something inside differs -- a code span, a bold word -- and
 		// emitting each separately turns one link into several.
-		if l := merged[i].link; l != "" {
+		if l := merged[i].link; l != "" && merged[i].attachment == nil {
 			j := i
-			for j+1 < len(merged) && merged[j+1].link == l {
+			for j+1 < len(merged) && merged[j+1].link == l && merged[j+1].attachment == nil {
 				j++
 			}
 			group := make([]span, 0, j-i+1)
@@ -608,4 +608,44 @@ func escapeURL(u string) string {
 		return "<" + b.String() + ">"
 	}
 	return b.String()
+}
+
+// Lossy reports the features of a note that a Markdown round trip cannot
+// preserve, as human-readable names. It is empty when the note can safely be
+// re-rendered from its Markdown.
+//
+// Rewriting a note means converting it to Markdown and back, and Notes can
+// store things Markdown cannot express through HTML. Anything listed here would
+// be destroyed by that trip, so callers rewriting an existing note must check
+// first.
+func (n *Note) Lossy() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for i := range n.Runs {
+		r := &n.Runs[i]
+		if r.Attachment != nil {
+			add("attachments")
+		}
+		if r.ParagraphStyle == nil {
+			continue
+		}
+		switch ps := r.ParagraphStyle; {
+		case ps.Checklist != nil, ps.StyleType == StyleChecklist:
+			add("checklists")
+		case ps.StyleType == StyleSubhead:
+			add("subheadings")
+		case ps.BlockQuote != 0:
+			add("block quotes")
+		}
+		if r.ParagraphStyle.IndentAmount > 0 {
+			add("indented or nested lists")
+		}
+	}
+	return out
 }

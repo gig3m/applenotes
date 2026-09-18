@@ -438,3 +438,43 @@ func runFontLink(length int, name, link string) []byte {
 	b := append(fVarint(1, uint64(length)), fBytes(3, fBytes(1, []byte(name)))...)
 	return append(b, fBytes(9, []byte(link))...)
 }
+
+// Rewriting a note means converting it to Markdown and back, which cannot carry
+// everything Notes can store. Lossy names what would be destroyed so a caller
+// can refuse instead of damaging the note.
+func TestLossyDetectsUnrepresentableContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		runs [][]byte
+		want string
+	}{
+		{"attachment", [][]byte{runAttach(1, "ID", "public.jpeg")}, "attachments"},
+		{"checklist", [][]byte{runCheck(4, false)}, "checklists"},
+		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
+		{"nested list", [][]byte{runIndent(4, StyleDotList, 1)}, "indented or nested lists"},
+	} {
+		n := decode(t, blob("text", tc.runs...))
+		got := n.Lossy()
+		if len(got) == 0 {
+			t.Errorf("%s: reported no loss", tc.name)
+			continue
+		}
+		var found bool
+		for _, g := range got {
+			if g == tc.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: got %v, want it to include %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Ordinary prose is safe to rewrite.
+func TestLossyAllowsPlainNotes(t *testing.T) {
+	n := decode(t, blob("title\nbody", run(6, 0, StyleTitle, ""), run(4, FontBold, -2, "https://x.test")))
+	if got := n.Lossy(); len(got) != 0 {
+		t.Errorf("plain note reported lossy: %v", got)
+	}
+}

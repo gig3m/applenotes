@@ -73,20 +73,38 @@ func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, e
 	return w.uuidFor(scriptID)
 }
 
+// ErrLossyRewrite reports that a note holds content a Markdown round trip
+// cannot preserve, so appending to it would destroy that content.
+type ErrLossyRewrite struct{ Features []string }
+
+func (e *ErrLossyRewrite) Error() string {
+	return "this note contains " + strings.Join(e.Features, ", ") +
+		", which a Markdown rewrite would destroy"
+}
+
 // Append adds Markdown to the end of a note.
 //
-// The existing body is read from SQLite and the whole note rewritten, rather
-// than concatenated through AppleScript. Reading a body through AppleScript
-// drops every hyperlink in it, so the obvious implementation silently destroys
-// links in the note being appended to.
+// There is no non-destructive way to do this. Notes offers no "append" verb, so
+// the note must be rewritten whole, and both routes to its existing body lose
+// something: reading through AppleScript drops every hyperlink, and rewriting
+// from Markdown drops anything Markdown cannot express.
 //
-// Because the read comes from the database, this appends to the note as last
-// persisted. Notes.app buffers writes, so an edit made on the Mac in the last
-// few moments may not be included.
+// So the body is read from SQLite, which preserves links, and the note is
+// checked first for content that the rewrite would destroy -- attachments,
+// checklists, block quotes, subheadings, nested lists. If it has any, this
+// refuses with *ErrLossyRewrite rather than damaging the note.
+//
+// Two further caveats apply even when it succeeds. The read comes from the
+// database, so an edit still buffered in Notes.app is not included -- and is
+// overwritten. And Markdown metacharacters in the existing prose are re-escaped
+// on the way through.
 func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
 	body, err := w.store.Body(uuid)
 	if err != nil {
 		return err
+	}
+	if lossy := body.Lossy(); len(lossy) > 0 {
+		return &ErrLossyRewrite{Features: lossy}
 	}
 	existing := body.Markdown()
 	if existing != "" {
