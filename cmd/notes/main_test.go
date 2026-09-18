@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -205,8 +207,19 @@ func TestBarAlwaysEmitsOneValidJSONObject(t *testing.T) {
 		if _, ok := got["text"]; !ok {
 			t.Errorf("%s: no text field: %q", tc.name, out.String())
 		}
-		if _, ok := got["class"]; !ok {
+		class, _ := got["class"].(string)
+		if class == "" {
 			t.Errorf("%s: no class field: %q", tc.name, out.String())
+		}
+		// The class is what lets a bar style a sleeping Mac differently from a
+		// live one. Asserting only that it exists would not notice it always
+		// saying "ok".
+		wantClass := "ok"
+		if tc.name != "local database" {
+			wantClass = "unreachable"
+		}
+		if class != wantClass {
+			t.Errorf("%s: class %q, want %q", tc.name, class, wantClass)
 		}
 	}
 }
@@ -223,12 +236,26 @@ func TestBarNeverLeaksTheToken(t *testing.T) {
 	}
 }
 
-// An unreachable Mac is the normal case, not a failure worth blocking on.
+// An unreachable Mac is the normal case, not a failure worth blocking on. The
+// server here hangs rather than refusing, so only the timeout can end it --
+// a refused connection returns instantly and would pass with no timeout at all.
 func TestBarFailsFast(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
 	start := time.Now()
 	var out bytes.Buffer
-	run([]string{"bar", "-server", "http://127.0.0.1:1", "-token", "t"}, strings.NewReader(""), &out, io.Discard)
-	if d := time.Since(start); d > barTimeout*2 {
-		t.Errorf("took %s", d)
+	run([]string{"bar", "-server", srv.URL, "-token", "t"}, strings.NewReader(""), &out, io.Discard)
+	if d := time.Since(start); d > barTimeout*3 {
+		t.Errorf("took %s, want it bounded by barTimeout (%s)", d, barTimeout)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("no JSON after a timeout: %q", out.String())
+	}
+	if got["class"] != "unreachable" {
+		t.Errorf("class %v after a timeout, want unreachable", got["class"])
 	}
 }

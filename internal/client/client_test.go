@@ -138,22 +138,29 @@ func TestDegradedFormattingIsCarriedBack(t *testing.T) {
 }
 
 // Property: a hostile or broken server cannot make the client allocate without
-// bound.
+// bound. The body here is valid JSON, so only the size cap can reject it --
+// an earlier version of this test sent malformed JSON and passed because of
+// that rather than because of the cap.
 func TestResponseSizeIsBounded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[`))
-		chunk := strings.Repeat(`{"uuid":"aaaaaaaa"},`, 1000)
-		for i := 0; i < 2000; i++ { // ~40MB
+		w.Write([]byte(`[{"uuid":"`))
+		chunk := strings.Repeat("a", 1<<20)
+		for i := 0; i < MaxResponse/len(chunk)+2; i++ {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}
 		}
+		w.Write([]byte(`"}]`))
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL, testToken).Notes(context.Background(), ListOptions{}); err == nil {
-		t.Error("an unbounded response was accepted")
+	_, err := New(srv.URL, testToken).Notes(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("an unbounded response was accepted")
+	}
+	if !strings.Contains(err.Error(), "more than") {
+		t.Errorf("rejected for the wrong reason: %v", err)
 	}
 }
 
