@@ -39,6 +39,24 @@ const DefaultTimeout = 60 * time.Second
 // "argument list too long".
 const MaxArgBytes = 512 << 10
 
+// Runner executes a script with arguments. It exists so that tests can assert
+// what would reach osascript: without it, nothing observes the script or the
+// argv, and the conversion to HTML could be removed from every write path with
+// no test failing.
+type Runner interface {
+	Run(ctx context.Context, src string, args ...string) (string, error)
+}
+
+// RunnerFunc adapts a function to Runner.
+type RunnerFunc func(ctx context.Context, src string, args ...string) (string, error)
+
+func (f RunnerFunc) Run(ctx context.Context, src string, args ...string) (string, error) {
+	return f(ctx, src, args...)
+}
+
+// Osascript is the real runner.
+var Osascript Runner = RunnerFunc(Run)
+
 // Run executes src with args available to its `on run argv` handler and returns
 // trimmed stdout.
 //

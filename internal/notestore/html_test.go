@@ -149,15 +149,53 @@ func TestDisallowedSchemeIsNotLinked(t *testing.T) {
 // on the absence of "<script>" cannot catch this, because the angle brackets
 // are escaped by a different branch than the quote.
 func TestDestinationCannotEscapeTheAttribute(t *testing.T) {
-	got := ToHTML(`[t](https://x.test/a"><script>alert(1)</script>)`)
-	if i := strings.Index(got, `href="`); i >= 0 {
-		rest := got[i+6:]
-		if end := strings.Index(rest, `"`); end >= 0 && strings.Contains(rest[:end], `"`) {
-			t.Errorf("raw quote inside href: %q", got)
+	// Exact output, not a search for something a failure might not produce. The
+	// earlier version looked for a quote inside the text up to the first quote,
+	// which is unsatisfiable, so a raw quote in a destination slipped through.
+	if got, want := ToHTML(`[t](https://x.test/a"b)`),
+		`<div><a href="https://x.test/a&#34;b">t</a></div>`; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+	if got := ToHTML(`[t](https://x.test/a"><script>alert(1)</script>)`); strings.Contains(got, `"><script`) {
+		t.Errorf("attribute break-out: %q", got)
+	}
+}
+
+// Both escapers, every metacharacter, exact output. These were reached only
+// incidentally before, so a raw quote or apostrophe could be emitted undetected.
+func TestEscapersHandleEveryMetacharacter(t *testing.T) {
+	for _, tc := range []struct{ in, inline, verbatim string }{
+		{"&", "&amp;", "&amp;"},
+		{"<", "&lt;", "&lt;"},
+		{">", "&gt;", "&gt;"},
+		{`"`, "&#34;", "&#34;"},
+		{"'", "&#39;", "&#39;"},
+		{"a&b", "a&amp;b", "a&amp;b"},
+	} {
+		if got := escapeInline(tc.in); got != tc.inline {
+			t.Errorf("escapeInline(%q) = %q, want %q", tc.in, got, tc.inline)
+		}
+		if got := escapeVerbatim(tc.in); got != tc.verbatim {
+			t.Errorf("escapeVerbatim(%q) = %q, want %q", tc.in, got, tc.verbatim)
 		}
 	}
-	if strings.Contains(got, `"><script`) {
-		t.Errorf("attribute break-out: %q", got)
+}
+
+// A character reference the renderer emitted must pass through unchanged --
+// escapeLineStart emits &#160; for an indented line, so this is a live
+// round-trip path -- while anything that only looks like one is escaped.
+func TestEntityPassThrough(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"&#160;x", "&#160;x"},
+		{"&amp;x", "&amp;x"},
+		{"&#x20;x", "&#x20;x"},
+		{"&;x", "&amp;;x"}, // empty reference: not one
+		{"&x", "&amp;x"},   // no semicolon: not one
+		{"&" + strings.Repeat("a", 40) + ";", "&amp;" + strings.Repeat("a", 40) + ";"}, // too long
+	} {
+		if got := escapeInline(tc.in); got != tc.want {
+			t.Errorf("escapeInline(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

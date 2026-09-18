@@ -54,6 +54,51 @@ func TestEveryRouteRequiresAuth(t *testing.T) {
 	}
 }
 
+// Property: only the exact token in an exact Bearer header is accepted. Each
+// case isolates one way the check could be loosened -- a scheme that is not
+// Bearer, a prefix of the token, an extension of it, or the token in the wrong
+// place -- because a single wrong-token case fails for several reasons at once
+// and so pins none of them.
+func TestAuthAcceptsOnlyTheExactBearerToken(t *testing.T) {
+	srv := newTestServer(t)
+	for _, auth := range []string{
+		"",
+		testToken,                                // no scheme
+		"Basic " + testToken,                     // wrong scheme
+		"bearer " + testToken,                    // scheme case: RFC says insensitive, we require exact
+		"Bearer " + testToken[:len(testToken)-1], // a prefix
+		"Bearer " + testToken + "x",              // an extension
+		"Bearer  " + testToken,                   // extra space
+		"Bearer " + strings.ToUpper(testToken),
+	} {
+		if rec := srv.do(t, "GET", "/v1/notes", "", auth); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%q was accepted (%d)", auth, rec.Code)
+		}
+	}
+	if rec := srv.do(t, "GET", "/v1/notes", "", "Bearer "+testToken); rec.Code != http.StatusOK {
+		t.Errorf("the correct token was rejected (%d)", rec.Code)
+	}
+}
+
+// Property: a write with no content is refused. An earlier version of the
+// malformed-input property accepted any status below 500, so a 202 for an empty
+// body passed it.
+func TestEmptyMarkdownIsRefused(t *testing.T) {
+	fakeOsascript(t)
+	srv := newTestServer(t)
+	for _, r := range routes() {
+		if !r.mutates || r.method == "DELETE" {
+			continue
+		}
+		for _, body := range []string{`{"markdown":""}`, `{"markdown":"   \n"}`, `{}`} {
+			rec := srv.do(t, r.method, r.path, body, "Bearer "+testToken)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s %s with %s: got %d, want 400", r.method, r.path, body, rec.Code)
+			}
+		}
+	}
+}
+
 // Property: a wrong token must not be distinguishable from a missing one by
 // anything the response says.
 func TestAuthFailuresAreIndistinguishable(t *testing.T) {

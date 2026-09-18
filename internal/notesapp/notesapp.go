@@ -33,9 +33,23 @@ import (
 // portable note UUIDs into the machine-local ids AppleScript addresses.
 type Writer struct {
 	store *notestore.Store
+
+	// Runner is how scripts are executed. Tests replace it to assert what
+	// would have reached osascript.
+	Runner applescript.Runner
 }
 
-func New(s *notestore.Store) *Writer { return &Writer{store: s} }
+func New(s *notestore.Store) *Writer {
+	return &Writer{store: s, Runner: applescript.Osascript}
+}
+
+func (w *Writer) run(ctx context.Context, src string, args ...string) (string, error) {
+	r := w.Runner
+	if r == nil {
+		r = applescript.Osascript
+	}
+	return r.Run(ctx, src, args...)
+}
 
 const createScript = `on run argv
 	set folderName to item 1 of argv
@@ -66,7 +80,7 @@ var ErrNotYetVisible = errors.New("notesapp: note created but not yet in the dat
 // is the common case immediately after a write. The note has still been
 // created; only its UUID is unknown.
 func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, error) {
-	scriptID, err := applescript.Run(ctx, createScript, folder, notestore.ToHTML(markdown))
+	scriptID, err := w.run(ctx, createScript, folder, notestore.ToHTML(markdown))
 	if err != nil {
 		return "", err
 	}
@@ -171,7 +185,7 @@ func (w *Writer) ReplaceForce(ctx context.Context, uuid, markdown string) error 
 	if err != nil {
 		return err
 	}
-	_, err = applescript.Run(ctx, replaceScript, id, notestore.ToHTML(markdown))
+	_, err = w.run(ctx, replaceScript, id, notestore.ToHTML(markdown))
 	return err
 }
 
@@ -186,7 +200,7 @@ func (w *Writer) Delete(ctx context.Context, uuid string) error {
 	if err != nil {
 		return err
 	}
-	_, err = applescript.Run(ctx, deleteScript, id)
+	_, err = w.run(ctx, deleteScript, id)
 	return err
 }
 

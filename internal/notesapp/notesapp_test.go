@@ -103,6 +103,10 @@ func TestLockedNoteIsDistinguishedFromMissing(t *testing.T) {
 	if !errors.Is(locked, notestore.ErrUnreadableBody) {
 		t.Errorf("locked note: got %v, want ErrUnreadableBody", locked)
 	}
+	// And it must say what to do about it: force is the only way through.
+	if !strings.Contains(locked.Error(), "force") {
+		t.Errorf("locked note: the error does not mention force: %v", locked)
+	}
 	_, missing := w.Replace(context.Background(), "UUID-NOSUCH", "new")
 	if !errors.Is(missing, notestore.ErrNotFound) || errors.Is(missing, notestore.ErrUnreadableBody) {
 		t.Errorf("missing note: got %v, want a plain not-found", missing)
@@ -131,6 +135,8 @@ func openFixture(t *testing.T) *notestore.Store {
 			(3, 'UUID-MISSING', 'Unreadable', 12),
 			(4, 'UUID-DEGRADED', 'Indented and underlined', 13),
 			(5, 'UUID-LOCKED', 'Locked', 14)`,
+		`UPDATE ZICCLOUDSYNCINGOBJECT SET ZISPASSWORDPROTECTED = 1 WHERE Z_PK = 5`,
+		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES (6, 'FOLDER-UUID', 'A folder')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatalf("%v\n%s", err, q)
