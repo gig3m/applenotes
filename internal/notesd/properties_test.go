@@ -248,3 +248,26 @@ func (s *testServer) dbDigest(t *testing.T) string {
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
+
+// Property: a panicking handler is one failed request, not a dropped
+// connection. A daemon going quiet looks exactly like the Mac being asleep.
+func TestPanicBecomesAnError(t *testing.T) {
+	srv := newTestServer(t)
+	panicking := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("note text that must not be echoed: SECRETNOTE")
+	}))
+	rec := httptest.NewRecorder()
+	panicking.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/notes", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("got %d, want 500", rec.Code)
+	}
+	if !json.Valid(rec.Body.Bytes()) {
+		t.Errorf("body is not JSON: %q", rec.Body)
+	}
+	// A panic value can carry anything that was in scope.
+	if strings.Contains(rec.Body.String(), "SECRETNOTE") {
+		t.Errorf("the panic value reached the response: %q", rec.Body)
+	}
+	_ = srv
+}

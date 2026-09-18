@@ -26,9 +26,13 @@ var ErrInvalidArgument = errors.New("applescript: unusable argument")
 
 var ErrNotPermitted = errors.New("applescript: not permitted to control Notes (grant Automation access, or run from a logged-in GUI session)")
 
-// Timeout bounds a single Apple Event. They are slow, and a blocked consent
-// prompt otherwise hangs forever with no output.
-var Timeout = 60 * time.Second
+// DefaultTimeout bounds a single Apple Event. They are slow, and a blocked
+// consent prompt otherwise hangs forever with no output.
+//
+// It is a constant rather than a variable: a server sharing this package across
+// requests should not have one caller able to change another's deadline. Pass a
+// context with your own deadline if you need a different one.
+const DefaultTimeout = 60 * time.Second
 
 // MaxArgBytes bounds the total size of argv. macOS caps argv plus environment
 // at kern.argmax, 1 MiB by default; exceeding it fails with an opaque
@@ -56,7 +60,8 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 		return "", fmt.Errorf("%w: %d bytes of arguments exceeds the %d byte limit", ErrInvalidArgument, total, MaxArgBytes)
 	}
 
-	deadlineCtx, cancel := context.WithTimeout(ctx, Timeout)
+	// Only imposed when the caller has not set a tighter one of their own.
+	deadlineCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
 	defer cancel()
 	ctx = deadlineCtx
 
@@ -74,7 +79,7 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 		return "", fmt.Errorf("applescript: cancelled; the change may still have been applied: %w", context.Canceled)
 	}
 	if err != nil && deadlineCtx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("applescript: timed out after %s; the change may still have been applied, since Notes.app has already received the event (a consent dialog may also be waiting on the Mac's screen): %w", Timeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("applescript: timed out; the change may still have been applied, since Notes.app has already received the event (a consent dialog may also be waiting on the Mac's screen): %w", context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())

@@ -11,8 +11,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"path"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -44,7 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/notes/{uuid}", s.replaceNote)
 	mux.HandleFunc("POST /v1/notes/{uuid}/append", s.appendNote)
 	mux.HandleFunc("DELETE /v1/notes/{uuid}", s.deleteNote)
-	return s.authenticated(rejectUncleanPaths(jsonErrors(mux)))
+	return recoverPanics(s.authenticated(rejectUncleanPaths(jsonErrors(mux))))
 }
 
 // authenticated rejects anything without the exact bearer token. The comparison
@@ -57,6 +59,23 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverPanics turns a panicking handler into a 500 rather than a dropped
+// connection. A daemon that a Linux box polls should fail one request, not go
+// quiet in a way that looks like the Mac being asleep.
+func recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				log.Printf("notesd: panic serving %s %s: %v\n%s", r.Method, r.URL.Path, v, debug.Stack())
+				// The detail goes to the log, not the response: a panic message
+				// can carry anything that was in scope, including note text.
+				writeError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
 		next.ServeHTTP(w, r)
 	})
 }
