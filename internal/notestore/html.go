@@ -76,7 +76,7 @@ func ToHTML(md string) string {
 		// block-level code construct reachable through HTML. A fence marker is
 		// only ever consumed when it opens or closes a block -- one that does
 		// neither is content, and dropping it silently deleted note text.
-		if m := fenceRe.FindStringSubmatch(trimmed); m != nil {
+		if m := fenceRe.FindStringSubmatch(strings.TrimRight(trimmed, " \t")); m != nil {
 			if !inFence {
 				inFence, fence = true, m[1]
 				closeList()
@@ -88,7 +88,7 @@ func ToHTML(md string) string {
 			}
 		}
 		if inFence {
-			fmt.Fprintf(&b, "<div><font face=\"Menlo\">%s</font></div>", html.EscapeString(line))
+			fmt.Fprintf(&b, "<div><font face=\"Menlo\">%s</font></div>", escapeVerbatim(line))
 			continue
 		}
 
@@ -163,7 +163,7 @@ var (
 	bulletRe  = regexp.MustCompile(`^([-*+])[ \t](.*)$`)
 	numberRe  = regexp.MustCompile(`^\d+[.)][ \t](.*)$`)
 	quoteRe   = regexp.MustCompile(`^>[ \t]?(.*)$`)
-	checkRe   = regexp.MustCompile(`^\[([ xX])\]\s+(.*)$`)
+	checkRe   = regexp.MustCompile(`^\[([ xX])\][ \t](.*)$`)
 	fenceRe   = regexp.MustCompile("^(`{3,}|~{3,})\\s*\\S*$")
 
 	linkRe   = regexp.MustCompile(`\[([^\]]*)\]\(`)
@@ -324,6 +324,52 @@ func escapeInline(s string) string {
 			b.WriteString("&#39;")
 		default:
 			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// writeSpace emits a space or tab in a form HTML will not collapse, and
+// reports whether it consumed the byte. A leading or trailing space, and the
+// second and later space of a run, must be non-breaking: a numeric reference to
+// U+0020 does not help, because it is still a space by the time layout runs.
+func writeSpace(b *strings.Builder, s string, i int) int {
+	switch s[i] {
+	case ' ':
+		if i == 0 || i == len(s)-1 || s[i-1] == ' ' || s[i-1] == '\t' {
+			b.WriteString("&#160;")
+			return 1
+		}
+	case '\t':
+		b.WriteString("&#160;&#160;&#160;&#160;")
+		return 1
+	}
+	return 0
+}
+
+// escapeVerbatim escapes text that must not be interpreted at all -- the body
+// of a fenced block -- while still keeping its whitespace. It deliberately does
+// not resolve backslash escapes: inside a fence a backslash is a backslash.
+func escapeVerbatim(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if n := writeSpace(&b, s, i); n > 0 {
+			continue
+		}
+		switch s[i] {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		case '"':
+			b.WriteString("&#34;")
+		case '\'':
+			b.WriteString("&#39;")
+		default:
+			b.WriteByte(s[i])
 		}
 	}
 	return b.String()

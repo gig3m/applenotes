@@ -66,6 +66,53 @@ func TestReplaceFailsClosedOnUnreadableBody(t *testing.T) {
 	}
 }
 
+// Formatting that will flatten must be reported, on both writing paths.
+func TestOnDegradeIsCalled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*Writer) error
+	}{
+		{"replace", func(w *Writer) error {
+			return w.Replace(context.Background(), "UUID-DEGRADED", "new")
+		}},
+		{"append", func(w *Writer) error {
+			return w.Append(context.Background(), "UUID-DEGRADED", "more")
+		}},
+	} {
+		w := New(openFixture(t))
+		var got []string
+		w.OnDegrade = func(f []string) { got = f }
+		_ = tc.call(w) // the Apple Event fails here; the callback fires first
+		if len(got) == 0 {
+			t.Errorf("%s: nothing reported for a note that will flatten", tc.name)
+		}
+	}
+}
+
+// A note that flattens nothing must not produce a warning.
+func TestOnDegradeSilentForPlainNotes(t *testing.T) {
+	w := New(openFixture(t))
+	called := false
+	w.OnDegrade = func([]string) { called = true }
+	_ = w.Replace(context.Background(), "UUID-PLAIN", "new")
+	if called {
+		t.Error("warned about a plain note")
+	}
+}
+
+// A locked note and a typo both fail, but they are different situations.
+func TestLockedNoteIsDistinguishedFromMissing(t *testing.T) {
+	w := New(openFixture(t))
+	locked := w.Replace(context.Background(), "UUID-LOCKED", "new")
+	if locked == nil || !strings.Contains(locked.Error(), "cannot be read") {
+		t.Errorf("locked note: got %v, want a message about an unreadable body", locked)
+	}
+	missing := w.Replace(context.Background(), "UUID-NOSUCH", "new")
+	if missing == nil || strings.Contains(missing.Error(), "cannot be read") {
+		t.Errorf("missing note: got %v, want a plain not-found", missing)
+	}
+}
+
 func openFixture(t *testing.T) *notestore.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "NoteStore.sqlite")
@@ -86,7 +133,8 @@ func openFixture(t *testing.T) *notestore.Store {
 			(1, 'UUID-ATTACH', 'Has attachment', 10),
 			(2, 'UUID-PLAIN', 'Plain', 11),
 			(3, 'UUID-MISSING', 'Unreadable', 12),
-			(4, 'UUID-DEGRADED', 'Indented and underlined', 13)`,
+			(4, 'UUID-DEGRADED', 'Indented and underlined', 13),
+			(5, 'UUID-LOCKED', 'Locked', 14)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatalf("%v\n%s", err, q)
@@ -102,6 +150,7 @@ func openFixture(t *testing.T) *notestore.Store {
 		{11, 2, noteBlob(t, false)},
 		{12, 3, []byte("not gzip")},
 		{13, 4, degradedBlob(t)},
+		{14, 5, nil}, // locked: the row exists, the body does not
 	} {
 		if _, err := db.Exec(`INSERT INTO ZICNOTEDATA VALUES (?, ?, ?)`, r.pk, r.note, r.blob); err != nil {
 			t.Fatal(err)

@@ -287,6 +287,18 @@ func TestWhitespaceIsNonBreaking(t *testing.T) {
 		{"heading trailing", "## hello ", "<h2>hello&#160;</h2>"},
 		{"numbered trailing", "1. n ", "<ol><li>n&#160;</li></ol>"},
 		{"quote trailing", "> q ", "<div>&gt; q&#160;</div>"},
+		{"heading leading", "##   lead", "<h2>&#160;&#160;lead</h2>"},
+		{"numbered leading", "1.   lead", "<ol><li>&#160;&#160;lead</li></ol>"},
+		// A fence body is the sixth block branch, and was the last one still
+		// flattening code indentation to column 0.
+		{"fence indent", "```\n    if x:\n```", `<div><font face="Menlo">&#160;&#160;&#160;&#160;if x:</font></div>`},
+		{"fence interior", "```\na  b\n```", `<div><font face="Menlo">a &#160;b</font></div>`},
+		// A backslash inside a fence is a backslash, not an escape.
+		{"fence backslash", "```\na\\_b\n```", `<div><font face="Menlo">a\_b</font></div>`},
+		{"fence with info string and trailing space", "```go \nx\n```", `<div><font face="Menlo">x</font></div>`},
+		// No separator after a marker means it is not a marker.
+		{"no separator is not a heading", "#head", "<div>#head</div>"},
+		{"no separator is not a bullet", "-item", "<div>-item</div>"},
 	} {
 		if got := ToHTML(tc.md); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)

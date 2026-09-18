@@ -324,6 +324,21 @@ func (s *Store) ScriptID(uuid string) (string, error) {
 	return fmt.Sprintf("x-coredata://%s/ICNote/p%d", store, pk), nil
 }
 
+// Exists reports whether a UUID names a note at all, without requiring its body
+// to be readable. Meta and Body both need a readable body, so neither can tell
+// a locked note from a typo.
+func (s *Store) Exists(uuid string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM ZICCLOUDSYNCINGOBJECT n
+		WHERE n.ZIDENTIFIER = ?
+		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK)`, uuid).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("notestore: %w", err)
+	}
+	return n > 0, nil
+}
+
 // UUIDForPK returns the portable UUID for a Core Data row id.
 func (s *Store) UUIDForPK(pk int64) (string, error) {
 	var u string

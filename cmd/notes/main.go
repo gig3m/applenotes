@@ -209,7 +209,8 @@ func writer(path string) (*notestore.Store, *notesapp.Writer, error) {
 	w := notesapp.New(s)
 	w.OnDegrade = func(features []string) {
 		fmt.Fprintf(os.Stderr,
-			"notes: this rewrite will flatten %s. No text is lost.\n",
+			"notes: this rewrite will flatten %s.\n"+
+				"       No text is removed, though an indent becomes spaces in the text.\n",
 			strings.Join(features, ", "))
 	}
 	return s, w, nil

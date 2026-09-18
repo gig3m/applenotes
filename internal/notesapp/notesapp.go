@@ -34,9 +34,12 @@ import (
 type Writer struct {
 	store *notestore.Store
 
-	// OnDegrade, if set, is called before a write that will flatten
-	// formatting, with the names of what will be lost. Nothing is destroyed,
-	// but the caller is the only one who can tell the user.
+	// OnDegrade, if set, is called before a write that will flatten formatting,
+	// with the names of what will be lost. No text is removed, though an
+	// indented paragraph gains non-breaking spaces where its indent was.
+	//
+	// It is a plain field, so a caller sharing one Writer across goroutines
+	// must set it before any write and not change it afterwards.
 	OnDegrade func(features []string)
 }
 
@@ -119,6 +122,7 @@ func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
 	if lost := body.Destroys(); len(lost) > 0 {
 		return &ErrLossyRewrite{Features: lost}
 	}
+	w.warn(body.Degrades())
 	existing := body.Markdown()
 	if existing != "" {
 		existing += "\n"
@@ -148,9 +152,12 @@ func (w *Writer) Replace(ctx context.Context, uuid, markdown string) error {
 	body, err := w.store.Body(uuid)
 	if errors.Is(err, notestore.ErrNotFound) {
 		// Either no such note, or one whose body cannot be read -- a locked
-		// note, say. Both refuse, but they are different situations and a
-		// caller needs to tell them apart.
-		if _, metaErr := w.store.Meta(uuid); metaErr != nil {
+		// note, say. Both refuse, but they are different situations. Store.Meta
+		// cannot tell them apart, because it requires a readable body for the
+		// same reason Body does; Store.Exists does not.
+		if ok, existsErr := w.store.Exists(uuid); existsErr != nil {
+			return existsErr
+		} else if !ok {
 			return err
 		}
 		return fmt.Errorf("this note's body cannot be read, so what a rewrite would destroy cannot be checked; pass force to overwrite it anyway: %w", err)
