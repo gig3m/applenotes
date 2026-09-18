@@ -1,0 +1,49 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.24' }
+
+      # The bridge Mac is usually an old machine kept for the purpose and will
+      # not have a Go toolchain, so install.sh takes a prebuilt binary beside
+      # it. A release has to carry one for that path to be real.
+      - name: build
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            out="dist/applenotes-${GITHUB_REF_NAME}-darwin-$arch"
+            mkdir -p "$out"
+            GOOS=darwin GOARCH=$arch go build -trimpath -o "$out/notesd" ./cmd/notesd
+            GOOS=darwin GOARCH=$arch go build -trimpath -o "$out/notes"  ./cmd/notes
+            cp install.sh uninstall.sh README.md LICENSE "$out/"
+            tar -C dist -czf "$out.tar.gz" "$(basename "$out")"
+          done
+          # The Linux side needs only the client.
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch go build -trimpath -o "dist/notes-linux-$arch" ./cmd/notes
+          done
+          (cd dist && shasum -a 256 *.tar.gz notes-linux-* > SHA256SUMS)
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/notes-linux-*
+            dist/SHA256SUMS
+          body: |
+            Unpack on the Mac that will act as the bridge, then run `./install.sh`.
+            It requires SIP to be disabled; the script explains why and refuses
+            otherwise.
+
+            The Linux client is a single binary: point it at the daemon with
+            `NOTESD_URL` and `NOTESD_TOKEN`, or `-server`.
