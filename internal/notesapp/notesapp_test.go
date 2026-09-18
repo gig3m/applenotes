@@ -20,7 +20,7 @@ import (
 
 func TestReplaceRefusesToDestroyContent(t *testing.T) {
 	w := New(openFixture(t))
-	_, err := w.Replace(context.Background(), "UUID-ATTACH", "new body")
+	_, err := w.Replace(context.Background(), "UUID-ATTACH", "new body", false)
 
 	var lossy *ErrLossyRewrite
 	if !errors.As(err, &lossy) {
@@ -34,7 +34,7 @@ func TestReplaceRefusesToDestroyContent(t *testing.T) {
 func TestAppendRefusesToDestroyContent(t *testing.T) {
 	w := New(openFixture(t))
 	var lossy *ErrLossyRewrite
-	if _, err := w.Append(context.Background(), "UUID-ATTACH", "more"); !errors.As(err, &lossy) {
+	if _, err := w.Append(context.Background(), "UUID-ATTACH", "more", false); !errors.As(err, &lossy) {
 		t.Fatalf("got %v, want ErrLossyRewrite", err)
 	}
 }
@@ -47,7 +47,7 @@ func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 	// that a previous version refused permanently, with no way to override it.
 	for _, uuid := range []string{"UUID-PLAIN", "UUID-DEGRADED"} {
 		var lossy *ErrLossyRewrite
-		if _, err := w.Replace(context.Background(), uuid, "new body"); errors.As(err, &lossy) {
+		if _, err := w.Replace(context.Background(), uuid, "new body", false); errors.As(err, &lossy) {
 			t.Errorf("%s was refused: %v", uuid, err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 // is known, so the guard must fail closed rather than overwrite it.
 func TestReplaceFailsClosedOnUnreadableBody(t *testing.T) {
 	w := New(openFixture(t))
-	_, err := w.Replace(context.Background(), "UUID-MISSING", "new body")
+	_, err := w.Replace(context.Background(), "UUID-MISSING", "new body", false)
 	if err == nil {
 		t.Fatal("an unreadable note was overwritten")
 	}
@@ -75,10 +75,10 @@ func TestDegradedFormattingIsReturned(t *testing.T) {
 		call func(*Writer, string) ([]string, error)
 	}{
 		{"replace", func(w *Writer, u string) ([]string, error) {
-			return w.Replace(context.Background(), u, "new")
+			return w.Replace(context.Background(), u, "new", false)
 		}},
 		{"append", func(w *Writer, u string) ([]string, error) {
-			return w.Append(context.Background(), u, "more")
+			return w.Append(context.Background(), u, "more", false)
 		}},
 	} {
 		w := New(openFixture(t))
@@ -97,7 +97,7 @@ func TestDegradedFormattingIsReturned(t *testing.T) {
 // A locked note and a typo both fail, but they are different situations.
 func TestLockedNoteIsDistinguishedFromMissing(t *testing.T) {
 	w := New(openFixture(t))
-	_, locked := w.Replace(context.Background(), "UUID-LOCKED", "new")
+	_, locked := w.Replace(context.Background(), "UUID-LOCKED", "new", false)
 	// Distinguishable programmatically, not just in prose: a daemon choosing a
 	// status code cannot be made to string-match.
 	if !errors.Is(locked, notestore.ErrUnreadableBody) {
@@ -107,7 +107,7 @@ func TestLockedNoteIsDistinguishedFromMissing(t *testing.T) {
 	if !strings.Contains(locked.Error(), "force") {
 		t.Errorf("locked note: the error does not mention force: %v", locked)
 	}
-	_, missing := w.Replace(context.Background(), "UUID-NOSUCH", "new")
+	_, missing := w.Replace(context.Background(), "UUID-NOSUCH", "new", false)
 	if !errors.Is(missing, notestore.ErrNotFound) || errors.Is(missing, notestore.ErrUnreadableBody) {
 		t.Errorf("missing note: got %v, want a plain not-found", missing)
 	}
@@ -125,7 +125,8 @@ func openFixture(t *testing.T) *notestore.Store {
 			ZTITLE1 TEXT, ZTITLE2 TEXT, ZSNIPPET TEXT, ZFOLDER INTEGER, ZNOTEDATA INTEGER,
 			ZCREATIONDATE1 REAL, ZCREATIONDATE REAL, ZCREATIONDATE2 REAL,
 			ZMODIFICATIONDATE1 REAL, ZMODIFICATIONDATE REAL,
-			ZMARKEDFORDELETION INTEGER, ZISPINNED INTEGER, ZISPASSWORDPROTECTED INTEGER)`,
+			ZMARKEDFORDELETION INTEGER, ZISPINNED INTEGER, ZISPASSWORDPROTECTED INTEGER,
+			ZZONEOWNERNAME TEXT, ZSERVERSHAREDATA BLOB)`,
 		`CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY, ZNOTE INTEGER, ZDATA BLOB)`,
 		`CREATE TABLE Z_METADATA (Z_UUID TEXT)`,
 		`INSERT INTO Z_METADATA VALUES ('STORE-UUID')`,
@@ -134,7 +135,14 @@ func openFixture(t *testing.T) *notestore.Store {
 			(2, 'UUID-PLAIN', 'Plain', 11),
 			(3, 'UUID-MISSING', 'Unreadable', 12),
 			(4, 'UUID-DEGRADED', 'An indented subheading', 13),
-			(5, 'UUID-LOCKED', 'Locked', 14)`,
+			(5, 'UUID-LOCKED', 'Locked', 14),
+			(7, 'UUID-THEIRS', 'Owned by someone else', 15),
+			(8, 'UUID-SHARED-BY-ME', 'Mine, shared out', 16)`,
+		// ZZONEOWNERNAME set means the note lives in another account's CloudKit
+		// zone: shared with this user. Share data without a zone owner is a
+		// note this account owns and has shared out, which stays writable.
+		`UPDATE ZICCLOUDSYNCINGOBJECT SET ZZONEOWNERNAME = '_someoneelse' WHERE Z_PK = 7`,
+		`UPDATE ZICCLOUDSYNCINGOBJECT SET ZSERVERSHAREDATA = X'00' WHERE Z_PK IN (7, 8)`,
 		`UPDATE ZICCLOUDSYNCINGOBJECT SET ZISPASSWORDPROTECTED = 1 WHERE Z_PK = 5`,
 		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES (6, 'FOLDER-UUID', 'A folder')`,
 	} {
@@ -153,6 +161,8 @@ func openFixture(t *testing.T) *notestore.Store {
 		{12, 3, []byte("not gzip")},
 		{13, 4, degradedBlob(t)},
 		{14, 5, nil}, // locked: the row exists, the body does not
+		{15, 7, noteBlob(t, false)},
+		{16, 8, noteBlob(t, false)},
 	} {
 		if _, err := db.Exec(`INSERT INTO ZICNOTEDATA VALUES (?, ?, ?)`, r.pk, r.note, r.blob); err != nil {
 			t.Fatal(err)
@@ -241,4 +251,81 @@ func noteBlob(t *testing.T, withAttachment bool) []byte {
 	}
 	zw.Close()
 	return buf.Bytes()
+}
+
+// A note shared with this user lives in the owner's CloudKit zone, so editing
+// it is not a local act: the change syncs to them and to everyone else on the
+// share. Default to refusing, and make the opt-in say so by name.
+//
+// This is deliberately below force. Accepting that a rewrite will flatten your
+// own formatting says nothing about whether you meant to edit someone else's
+// note, so -force must not open this gate.
+func TestWritesToSomeoneElsesNoteAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*Writer, string, bool) error
+	}{
+		{"replace", func(w *Writer, u string, allow bool) error {
+			_, err := w.Replace(context.Background(), u, "new", allow)
+			return err
+		}},
+		{"replace -force", func(w *Writer, u string, allow bool) error {
+			return w.ReplaceForce(context.Background(), u, "new", allow)
+		}},
+		{"append", func(w *Writer, u string, allow bool) error {
+			_, err := w.Append(context.Background(), u, "more", allow)
+			return err
+		}},
+		{"delete", func(w *Writer, u string, allow bool) error {
+			return w.Delete(context.Background(), u, allow)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := New(openFixture(t))
+			var shared *ErrSharedNote
+			if err := tc.call(w, "UUID-THEIRS", false); !errors.As(err, &shared) {
+				t.Errorf("a note owned by someone else was not refused: %v", err)
+			}
+			// Opting in gets past the gate. The Apple Event fails after it --
+			// osascript does not exist here -- which is how we know the gate
+			// was the only thing in the way.
+			var stillShared *ErrSharedNote
+			if err := tc.call(w, "UUID-THEIRS", true); errors.As(err, &stillShared) {
+				t.Errorf("the opt-in did not get past the gate: %v", err)
+			}
+		})
+	}
+}
+
+// A note this account owns and has shared with others is still this account's
+// note. Refusing it would make every shared note read-only, which is not what
+// sharing means.
+func TestANoteSharedOutStaysWritable(t *testing.T) {
+	w := New(openFixture(t))
+	var shared *ErrSharedNote
+	if _, err := w.Replace(context.Background(), "UUID-SHARED-BY-ME", "new", false); errors.As(err, &shared) {
+		t.Errorf("a note this account owns was refused as someone else's: %v", err)
+	}
+	if _, err := w.Replace(context.Background(), "UUID-PLAIN", "new", false); errors.As(err, &shared) {
+		t.Errorf("an ordinary note was refused as someone else's: %v", err)
+	}
+}
+
+// Fails closed. If ownership cannot be established the write does not happen:
+// the cost of guessing wrong is damage to someone else's note.
+func TestUnknownOwnershipRefusesTheWrite(t *testing.T) {
+	w := New(openFixture(t))
+	err := w.ReplaceForce(context.Background(), "UUID-NO-SUCH-NOTE", "new", false)
+	if err == nil {
+		t.Fatal("a note whose ownership could not be checked was written")
+	}
+	// The error code alone proves nothing here: the write would fail later
+	// anyway because there is no such note. It has to fail at the ownership
+	// check, or a database error would let a foreign note through.
+	if !strings.Contains(err.Error(), "yours to write") {
+		t.Errorf("failed for the wrong reason: %v", err)
+	}
+	if !errors.Is(err, notestore.ErrNotFound) {
+		t.Errorf("the underlying cause was not kept: %v", err)
+	}
 }

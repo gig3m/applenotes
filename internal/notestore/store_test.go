@@ -367,3 +367,98 @@ func TestOpenMissingFile(t *testing.T) {
 		t.Error("expected an error for a missing database")
 	}
 }
+
+// sharedDB builds a fixture with the CloudKit sharing columns, which the main
+// fixture deliberately lacks so that both schema shapes stay covered.
+func sharedDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "NoteStore.sqlite")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER TEXT,
+			ZTITLE1 TEXT, ZTITLE2 TEXT, ZSNIPPET TEXT, ZFOLDER INTEGER, ZNOTEDATA INTEGER,
+			ZCREATIONDATE1 REAL, ZCREATIONDATE REAL, ZCREATIONDATE2 REAL,
+			ZMODIFICATIONDATE1 REAL, ZMODIFICATIONDATE REAL,
+			ZMARKEDFORDELETION INTEGER, ZISPINNED INTEGER, ZISPASSWORDPROTECTED INTEGER,
+			ZZONEOWNERNAME TEXT, ZSERVERSHAREDATA BLOB)`,
+		`CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY, ZNOTE INTEGER, ZDATA BLOB)`,
+		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES (1, 'DefaultFolder-CloudKit', 'Notes')`,
+		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE1, ZFOLDER, ZNOTEDATA, ZZONEOWNERNAME, ZSERVERSHAREDATA) VALUES
+			(10, 'UUID-MINE',      'Mine',           1, 200, NULL,           NULL),
+			(11, 'UUID-THEIRS',    'Theirs',         1, 201, '_otheruser',   X'00'),
+			(12, 'UUID-SHARED-OUT','Mine, shared',   1, 202, NULL,           X'00'),
+			(13, 'UUID-NO-RECORD', 'Foreign, no share record', 1, 203, '_otheruser', NULL)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+	}
+	body := blob("text", run(4, 0, StyleBody, ""))
+	for i, pk := range []int{10, 11, 12, 13} {
+		if _, err := db.Exec(`INSERT INTO ZICNOTEDATA VALUES (?, ?, ?)`, 200+i, pk, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	return path
+}
+
+// Ownership separates three states, and conflating any two of them is a real
+// mistake: "shared" alone would make notes this account owns read-only, and
+// owner alone would miss a note shared out.
+func TestOwnershipIsReadFromTheDatabase(t *testing.T) {
+	s, err := Open(sharedDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, tc := range []struct {
+		uuid                 string
+		shared, withMe, byMe bool
+		owner                string
+	}{
+		{"UUID-MINE", false, false, false, ""},
+		{"UUID-THEIRS", true, true, false, "_otheruser"},
+		{"UUID-SHARED-OUT", true, false, true, ""},
+		// A foreign zone with no share record yet: still someone else's note.
+		// Treating it as unshared would let a write through unannounced.
+		{"UUID-NO-RECORD", true, true, false, "_otheruser"},
+	} {
+		m, err := s.Meta(tc.uuid)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.uuid, err)
+		}
+		if m.Shared != tc.shared || m.SharedWithMe() != tc.withMe ||
+			m.SharedByMe() != tc.byMe || m.Owner != tc.owner {
+			t.Errorf("%s: shared=%v withMe=%v byMe=%v owner=%q, want %v/%v/%v/%q",
+				tc.uuid, m.Shared, m.SharedWithMe(), m.SharedByMe(), m.Owner,
+				tc.shared, tc.withMe, tc.byMe, tc.owner)
+		}
+	}
+}
+
+// Notes predating CloudKit sharing have no such columns, and selecting a column
+// that is not there fails the whole query -- so every note would become
+// unreadable to gain a field that is only sometimes present.
+func TestAnOlderSchemaWithoutSharingColumnsStillWorks(t *testing.T) {
+	s := openTest(t) // the main fixture has no sharing columns
+	notes, err := s.Notes(ListOptions{})
+	if err != nil {
+		t.Fatalf("listing failed on a schema without sharing columns: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Fatal("no notes")
+	}
+	for _, n := range notes {
+		if n.Shared || n.SharedWithMe() || n.Owner != "" {
+			t.Errorf("%s reported sharing from a schema that cannot express it", n.UUID)
+		}
+	}
+	if _, err := s.Meta(notes[0].UUID); err != nil {
+		t.Errorf("Meta failed on a schema without sharing columns: %v", err)
+	}
+}

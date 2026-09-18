@@ -175,13 +175,21 @@ type noteJSON struct {
 	Modified time.Time `json:"modified"`
 	// Trashed, not Deleted: a note reaches the trash by more than one route and
 	// the flag alone misses some of them.
-	Trashed  bool     `json:"trashed"`
-	Pinned   bool     `json:"pinned"`
-	Locked   bool     `json:"locked"`
-	DeepLink string   `json:"deepLink"`
-	Markdown string   `json:"markdown,omitempty"`
-	Degrades []string `json:"degrades,omitempty"`
-	Destroys []string `json:"destroys,omitempty"`
+	Trashed  bool   `json:"trashed"`
+	Pinned   bool   `json:"pinned"`
+	Locked   bool   `json:"locked"`
+	DeepLink string `json:"deepLink"`
+	// Shared is true for a note in a CloudKit share, in either direction.
+	// SharedWithMe narrows that to a note owned by another account, which is
+	// read-only unless a write explicitly opts in -- editing it syncs the
+	// change to its owner. Owner is that account's record id, present only
+	// for SharedWithMe.
+	Shared       bool     `json:"shared,omitempty"`
+	SharedWithMe bool     `json:"sharedWithMe,omitempty"`
+	Owner        string   `json:"owner,omitempty"`
+	Markdown     string   `json:"markdown,omitempty"`
+	Degrades     []string `json:"degrades,omitempty"`
+	Destroys     []string `json:"destroys,omitempty"`
 	// BodyError is set when the contents could not be read, so a client does
 	// not mistake an absent advisory for an empty one.
 	BodyError string `json:"bodyError,omitempty"`
@@ -193,6 +201,7 @@ func metaJSON(m notestore.NoteMeta) noteJSON {
 		Created: m.Created, Modified: m.Modified,
 		Trashed: m.Trashed, Pinned: m.Pinned, Locked: m.Locked,
 		DeepLink: m.DeepLink(),
+		Shared:   m.Shared, SharedWithMe: m.SharedWithMe(), Owner: m.Owner,
 	}
 }
 
@@ -263,6 +272,11 @@ type writeRequest struct {
 	Markdown string `json:"markdown"`
 	Folder   string `json:"folder"`
 	Force    bool   `json:"force"`
+	// AllowShared permits a write to a note owned by another iCloud account,
+	// which syncs the change to its owner. Deliberately separate from Force:
+	// accepting formatting loss in your own note says nothing about whether
+	// you meant to edit someone else's.
+	AllowShared bool `json:"allowShared"`
 }
 
 func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
@@ -295,9 +309,9 @@ func (s *Server) replaceNote(w http.ResponseWriter, r *http.Request) {
 	var degraded []string
 	var err error
 	if req.Force {
-		err = notesapp.New(s.store).ReplaceForce(r.Context(), r.PathValue("uuid"), req.Markdown)
+		err = notesapp.New(s.store).ReplaceForce(r.Context(), r.PathValue("uuid"), req.Markdown, req.AllowShared)
 	} else {
-		degraded, err = notesapp.New(s.store).Replace(r.Context(), r.PathValue("uuid"), req.Markdown)
+		degraded, err = notesapp.New(s.store).Replace(r.Context(), r.PathValue("uuid"), req.Markdown, req.AllowShared)
 	}
 	s.acknowledge(w, err, degraded, true)
 }
@@ -307,14 +321,16 @@ func (s *Server) appendNote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	degraded, err := notesapp.New(s.store).Append(r.Context(), r.PathValue("uuid"), req.Markdown)
+	degraded, err := notesapp.New(s.store).Append(r.Context(), r.PathValue("uuid"), req.Markdown, req.AllowShared)
 	s.acknowledge(w, err, degraded, false)
 }
 
 func (s *Server) deleteNote(w http.ResponseWriter, r *http.Request) {
 	// Deleting moves the note to Recently Deleted, where Notes keeps it for 30
-	// days, so it is not guarded the way a rewrite is.
-	s.acknowledge(w, notesapp.New(s.store).Delete(r.Context(), r.PathValue("uuid")), nil, false)
+	// days, so it is not guarded the way a rewrite is -- except for ownership.
+	// Removing a note from someone else's share is not recoverable by them.
+	allowShared := r.URL.Query().Get("allowShared") == "true"
+	s.acknowledge(w, notesapp.New(s.store).Delete(r.Context(), r.PathValue("uuid"), allowShared), nil, false)
 }
 
 // --- plumbing ---------------------------------------------------------------

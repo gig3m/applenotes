@@ -191,6 +191,10 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 			Deleted  bool   `json:"deleted"`
 			Query    string `json:"query"`
 			Force    bool   `json:"force"`
+			// Separate from Force: a note owned by another iCloud account is
+			// read-only unless the caller says otherwise, because editing it
+			// syncs the change to its owner.
+			AllowShared bool `json:"allowShared"`
 		} `json:"arguments"`
 	}
 	if err := json.Unmarshal(raw, &call); err != nil {
@@ -268,7 +272,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 		if strings.TrimSpace(a.Markdown) == "" {
 			return toolResult("markdown must not be empty", true)
 		}
-		degraded, err := notesapp.New(s.store).Append(ctx, a.UUID, a.Markdown)
+		degraded, err := notesapp.New(s.store).Append(ctx, a.UUID, a.Markdown, a.AllowShared)
 		if err != nil {
 			return toolResult(writeAdvice(err), true)
 		}
@@ -281,9 +285,9 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 		var degraded []string
 		var err error
 		if a.Force {
-			err = notesapp.New(s.store).ReplaceForce(ctx, a.UUID, a.Markdown)
+			err = notesapp.New(s.store).ReplaceForce(ctx, a.UUID, a.Markdown, a.AllowShared)
 		} else {
-			degraded, err = notesapp.New(s.store).Replace(ctx, a.UUID, a.Markdown)
+			degraded, err = notesapp.New(s.store).Replace(ctx, a.UUID, a.Markdown, a.AllowShared)
 		}
 		if err != nil {
 			return toolResult(writeAdvice(err), true)
@@ -291,7 +295,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 		return toolJSON(map[string]any{"accepted": true, "degraded": degraded})
 
 	case "delete_note":
-		if err := notesapp.New(s.store).Delete(ctx, a.UUID); err != nil {
+		if err := notesapp.New(s.store).Delete(ctx, a.UUID, a.AllowShared); err != nil {
 			return toolResult(writeAdvice(err), true)
 		}
 		return toolJSON(map[string]any{"accepted": true})
@@ -302,6 +306,10 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) map[string]a
 // writeAdvice turns a write failure into something a model can act on rather
 // than retry blindly.
 func writeAdvice(err error) string {
+	var shared *notesapp.ErrSharedNote
+	if errors.As(err, &shared) {
+		return err.Error() + ". Set allowShared to true only if the owner should receive this change."
+	}
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
 		return fmt.Sprintf("%s. Retry with force set to true only if losing %s is acceptable.",

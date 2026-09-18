@@ -87,6 +87,41 @@ func (w *Writer) Create(ctx context.Context, folder, markdown string) (string, e
 	return w.uuidFor(scriptID)
 }
 
+// ErrSharedNote reports a write aimed at a note owned by another account.
+//
+// A write here is not local. A note shared with this user lives in the owner's
+// CloudKit zone, so editing it syncs the change to them and to everyone else on
+// the share. That is a different decision from accepting formatting loss, so it
+// is a separate gate: force does not open it, and nothing bypasses it except
+// asking for it by name.
+type ErrSharedNote struct{ Owner string }
+
+func (e *ErrSharedNote) Error() string {
+	return "this note belongs to another iCloud account and is read-only here; " +
+		"editing it would sync the change to its owner"
+}
+
+// checkOwnership refuses a write to a note this account does not own.
+//
+// Fails closed: if ownership cannot be determined the write does not happen,
+// because the cost of being wrong is someone else's note. The exception is a
+// database old enough to lack the sharing columns, where Owner is empty for
+// every note -- there is nothing to know there, and refusing every write would
+// be worse than the risk.
+func (w *Writer) checkOwnership(uuid string, allowShared bool) error {
+	if allowShared {
+		return nil
+	}
+	meta, err := w.store.Meta(uuid)
+	if err != nil {
+		return fmt.Errorf("cannot tell whether this note is yours to write: %w", err)
+	}
+	if meta.SharedWithMe() {
+		return &ErrSharedNote{Owner: meta.Owner}
+	}
+	return nil
+}
+
 // ErrLossyRewrite reports that a note holds content a Markdown rewrite would
 // destroy outright -- attachments or checklists, not merely formatting that
 // would flatten.
@@ -117,7 +152,7 @@ func (e *ErrLossyRewrite) Error() string {
 // Append returns the formatting the rewrite flattened. It is a return value
 // rather than a callback on the Writer so that a server handling concurrent
 // requests cannot report one request's loss in another's response.
-func (w *Writer) Append(ctx context.Context, uuid, markdown string) (degraded []string, err error) {
+func (w *Writer) Append(ctx context.Context, uuid, markdown string, allowShared bool) (degraded []string, err error) {
 	body, err := w.store.Body(uuid)
 	if err != nil {
 		return nil, w.explain(uuid, err)
@@ -129,7 +164,7 @@ func (w *Writer) Append(ctx context.Context, uuid, markdown string) (degraded []
 	if existing != "" {
 		existing += "\n"
 	}
-	return body.Degrades(), w.ReplaceForce(ctx, uuid, existing+markdown)
+	return body.Degrades(), w.ReplaceForce(ctx, uuid, existing+markdown, allowShared)
 }
 
 const replaceScript = `on run argv
@@ -147,7 +182,7 @@ end run`
 // that would silently discard attachments and checklists. Formatting that
 // merely flattens is not grounds for refusing; Note.Degrades reports that
 // separately. ReplaceForce skips the check for a caller that means it.
-func (w *Writer) Replace(ctx context.Context, uuid, markdown string) (degraded []string, err error) {
+func (w *Writer) Replace(ctx context.Context, uuid, markdown string, allowShared bool) (degraded []string, err error) {
 	// Fails closed. A body that cannot be read is a locked or corrupt note --
 	// exactly the case where least is known and most could be lost -- so an
 	// unreadable note is refused rather than silently overwritten.
@@ -158,7 +193,7 @@ func (w *Writer) Replace(ctx context.Context, uuid, markdown string) (degraded [
 	if lost := body.Destroys(); len(lost) > 0 {
 		return nil, &ErrLossyRewrite{Features: lost}
 	}
-	return body.Degrades(), w.ReplaceForce(ctx, uuid, markdown)
+	return body.Degrades(), w.ReplaceForce(ctx, uuid, markdown, allowShared)
 }
 
 // explain turns a failed body read into an error a caller can act on. A missing
@@ -180,7 +215,12 @@ func (w *Writer) explain(uuid string, err error) error {
 }
 
 // ReplaceForce overwrites a note's body without checking what that discards.
-func (w *Writer) ReplaceForce(ctx context.Context, uuid, markdown string) error {
+// It still refuses a note owned by another account: force is about accepting
+// loss in your own note, not about writing in someone else's.
+func (w *Writer) ReplaceForce(ctx context.Context, uuid, markdown string, allowShared bool) error {
+	if err := w.checkOwnership(uuid, allowShared); err != nil {
+		return err
+	}
 	id, err := w.store.ScriptID(uuid)
 	if err != nil {
 		return err
@@ -195,7 +235,10 @@ end run`
 
 // Delete moves a note to Recently Deleted. Notes keeps it there for 30 days, so
 // this is recoverable.
-func (w *Writer) Delete(ctx context.Context, uuid string) error {
+func (w *Writer) Delete(ctx context.Context, uuid string, allowShared bool) error {
+	if err := w.checkOwnership(uuid, allowShared); err != nil {
+		return err
+	}
 	id, err := w.store.ScriptID(uuid)
 	if err != nil {
 		return err

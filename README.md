@@ -336,6 +336,29 @@ the most recent note's UUID, for an `on-click` that opens it.
 - [threeplanetssoftware/apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) — the reverse-engineered `notestore.proto` this decoder follows.
 - [BlueBubbles](https://bluebubbles.app) — the same bargain, for iMessage.
 
+## Notes you do not own
+
+A note shared *with* you lives in the owner's iCloud account, not yours. Editing
+it is not a local act: the change syncs to them and to everyone else on the
+share. So those notes are read-only by default and every write is refused:
+
+```
+notes: this note belongs to another iCloud account and is read-only here;
+       editing it would sync the change to its owner.
+       Pass -shared to write it anyway
+```
+
+`list` marks them `[theirs]`, and notes you own and have shared out `[shared]`
+-- those stay writable, because they are yours.
+
+`-shared` is deliberately separate from `-force`. Accepting that a rewrite will
+flatten your own formatting says nothing about whether you meant to edit
+someone else's note, so `-force` does not open this gate.
+
+Over HTTP the same opt-in is `"allowShared": true` in the write body, and
+`?allowShared=true` on a delete. Every note carries `shared`, `sharedWithMe`
+and `owner`.
+
 ## How Notes' formatting maps to Markdown
 
 Most of it is ordinary Markdown. Two things are not, because Notes has features

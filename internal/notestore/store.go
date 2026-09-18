@@ -54,11 +54,32 @@ type NoteMeta struct {
 	Trashed    bool // in Recently Deleted by any route: the flag, the folder, or a deleted folder
 	Pinned     bool
 	Locked     bool // password-protected; the body is not readable
+
+	// Shared reports that the note is in a CloudKit share, in either
+	// direction. Owner is empty for a note in this account's own zone and
+	// carries the other account's record id for a note shared with this user.
+	//
+	// The distinction matters because a write is not local: editing a note in
+	// someone else's zone syncs the change to them.
+	Shared bool
+	Owner  string
 }
+
+// SharedWithMe reports a note that belongs to someone else's account. Writing
+// to one pushes the change to its owner, so callers default to refusing.
+func (n NoteMeta) SharedWithMe() bool { return n.Owner != "" }
+
+// SharedByMe reports a note this account owns and has shared with others.
+func (n NoteMeta) SharedByMe() bool { return n.Shared && n.Owner == "" }
 
 // Store is a read-only view of a Notes database.
 type Store struct {
 	db *sql.DB
+	// sharing reports whether this database has the CloudKit sharing columns.
+	// They are absent on older versions of Notes, and selecting a column that
+	// is not there fails the whole query -- so every note would become
+	// unreadable to gain a field that is only sometimes present.
+	sharing bool
 }
 
 // Open opens the database read-only. Notes runs in WAL mode, so this reads
@@ -108,7 +129,32 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("notestore: opening %s: %w (if this is a copied database, its -wal and -shm files must be copied too, and the directory must be writable)", abs, err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	s.sharing = s.hasColumns("ZICCLOUDSYNCINGOBJECT", "ZZONEOWNERNAME", "ZSERVERSHAREDATA")
+	return s, nil
+}
+
+// hasColumns reports whether a table has every named column. Used to keep a
+// query working against a schema that predates a field rather than failing.
+func (s *Store) hasColumns(table string, want ...string) bool {
+	rows, err := s.db.Query("SELECT name FROM pragma_table_info(?)", table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if rows.Scan(&n) == nil {
+			have[n] = true
+		}
+	}
+	for _, w := range want {
+		if !have[w] {
+			return false
+		}
+	}
+	return rows.Err() == nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -152,7 +198,19 @@ type ListOptions struct {
 // data, and it is still a note that should be listed and addressable. A row
 // with neither -- no readable body and not locked -- is a placeholder, not a
 // note; a real library has several.
-const noteSelect = `
+// noteSelect is the column list for a note row. The sharing columns are added
+// only when the schema has them; the placeholders keep the scan positions fixed
+// either way, so scanNotes does not need two shapes.
+func (s *Store) noteSelect() string {
+	if s.sharing {
+		return noteSelectBase + `,
+	       COALESCE(n.ZZONEOWNERNAME, ''),
+	       (n.ZSERVERSHAREDATA IS NOT NULL)` + noteSelectFrom
+	}
+	return noteSelectBase + `, '', 0` + noteSelectFrom
+}
+
+const noteSelectBase = `
 	SELECT n.Z_PK,
 	       COALESCE(n.ZIDENTIFIER, ''),
 	       COALESCE(n.ZTITLE1, ''),
@@ -165,7 +223,14 @@ const noteSelect = `
 	       COALESCE(n.ZMARKEDFORDELETION, 0),
 	       COALESCE(n.ZISPINNED, 0),
 	       COALESCE(n.ZISPASSWORDPROTECTED, 0),
-	       COALESCE(f.ZMARKEDFORDELETION, 0)
+	       COALESCE(f.ZMARKEDFORDELETION, 0)`
+
+// ZZONEOWNERNAME is the CloudKit zone owner: NULL in this account's own zone,
+// another account's record id for a note shared with this user.
+// ZSERVERSHAREDATA is present whenever a note is in a share, in either
+// direction, so the two together separate "mine", "shared by me" and "shared
+// with me".
+const noteSelectFrom = `
 	FROM ZICCLOUDSYNCINGOBJECT n
 	LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON f.Z_PK = n.ZFOLDER
 	WHERE (EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
@@ -173,7 +238,7 @@ const noteSelect = `
 
 // Notes lists note metadata, newest first.
 func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
-	q := noteSelect
+	q := s.noteSelect()
 	var args []any
 	if !opt.IncludeDeleted {
 		// A note is in the trash either by its own flag or by living in the
@@ -210,7 +275,7 @@ var ErrUnreadableBody = errors.New("notestore: note body cannot be read")
 
 // Meta looks a note up by its ZIDENTIFIER UUID.
 func (s *Store) Meta(uuid string) (NoteMeta, error) {
-	rows, err := s.db.Query(noteSelect+` AND n.ZIDENTIFIER = ? ORDER BY n.Z_PK LIMIT 1`, uuid)
+	rows, err := s.db.Query(s.noteSelect()+` AND n.ZIDENTIFIER = ? ORDER BY n.Z_PK LIMIT 1`, uuid)
 	if err != nil {
 		return NoteMeta{}, err
 	}
@@ -256,10 +321,10 @@ func scanNotes(rows *sql.Rows) ([]NoteMeta, error) {
 	for rows.Next() {
 		var n NoteMeta
 		var c1, c2, c3, m1, m2 sql.NullFloat64
-		var del, pin, locked, folderDel int
+		var del, pin, locked, folderDel, shared int
 		if err := rows.Scan(&n.ID, &n.UUID, &n.Title, &n.Snippet, &n.FolderID,
 			&n.FolderName, &n.FolderUUID, &c1, &c2, &c3, &m1, &m2,
-			&del, &pin, &locked, &folderDel); err != nil {
+			&del, &pin, &locked, &folderDel, &n.Owner, &shared); err != nil {
 			return nil, err
 		}
 		// The fallback is resolved here rather than with COALESCE, which stops
@@ -270,6 +335,10 @@ func scanNotes(rows *sql.Rows) ([]NoteMeta, error) {
 		n.Pinned, n.Locked = pin != 0, locked != 0
 		n.Deleted = del != 0
 		n.Trashed = n.Deleted || n.FolderUUID == "TrashFolder-CloudKit" || folderDel != 0
+		// A note in a foreign zone is shared even if the share record has not
+		// arrived yet: the owner is the stronger signal, and defaulting to
+		// "not shared" there would let a write through unannounced.
+		n.Shared = shared != 0 || n.Owner != ""
 		out = append(out, n)
 	}
 	return out, rows.Err()

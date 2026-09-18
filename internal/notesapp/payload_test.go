@@ -43,7 +43,7 @@ func TestWritesSendHTMLNotMarkdown(t *testing.T) {
 			return err
 		}},
 		{"replace", func(w *Writer) error {
-			_, err := w.Replace(context.Background(), "UUID-PLAIN", "# Heading\n\n- bullet")
+			_, err := w.Replace(context.Background(), "UUID-PLAIN", "# Heading\n\n- bullet", false)
 			return err
 		}},
 	} {
@@ -65,7 +65,7 @@ func TestWritesSendHTMLNotMarkdown(t *testing.T) {
 func TestWritesSendTheCoreDataID(t *testing.T) {
 	c := &capture{}
 	w := writerWith(t, c)
-	_, _ = w.Replace(context.Background(), "UUID-PLAIN", "body")
+	_, _ = w.Replace(context.Background(), "UUID-PLAIN", "body", false)
 
 	// UUID-PLAIN is row 2 in the fixture.
 	const want = "x-coredata://STORE-UUID/ICNote/p2"
@@ -78,7 +78,7 @@ func TestWritesSendTheCoreDataID(t *testing.T) {
 func TestFolderUUIDIsNotAddressable(t *testing.T) {
 	c := &capture{}
 	w := writerWith(t, c)
-	_, err := w.Replace(context.Background(), "FOLDER-UUID", "body")
+	_, err := w.Replace(context.Background(), "FOLDER-UUID", "body", false)
 	if err == nil {
 		t.Fatal("a folder UUID was accepted as a note")
 	}
@@ -92,7 +92,7 @@ func TestFolderUUIDIsNotAddressable(t *testing.T) {
 func TestAppendComposesWithANewline(t *testing.T) {
 	c := &capture{}
 	w := writerWith(t, c)
-	if _, err := w.Append(context.Background(), "UUID-PLAIN", "added"); err != nil {
+	if _, err := w.Append(context.Background(), "UUID-PLAIN", "added", false); err != nil {
 		t.Fatal(err)
 	}
 	body := c.args[len(c.args)-1]

@@ -49,9 +49,15 @@ type Note struct {
 	Pinned   bool      `json:"pinned"`
 	Locked   bool      `json:"locked"`
 	DeepLink string    `json:"deepLink"`
-	Markdown string    `json:"markdown,omitempty"`
-	Degrades []string  `json:"degrades,omitempty"`
-	Destroys []string  `json:"destroys,omitempty"`
+	// SharedWithMe marks a note owned by another iCloud account. Writing to
+	// one syncs the change to its owner, so it is read-only unless the write
+	// opts in.
+	Shared       bool     `json:"shared"`
+	SharedWithMe bool     `json:"sharedWithMe"`
+	Owner        string   `json:"owner"`
+	Markdown     string   `json:"markdown,omitempty"`
+	Degrades     []string `json:"degrades,omitempty"`
+	Destroys     []string `json:"destroys,omitempty"`
 }
 
 type Folder struct {
@@ -137,6 +143,9 @@ type writeRequest struct {
 	Markdown string `json:"markdown"`
 	Folder   string `json:"folder,omitempty"`
 	Force    bool   `json:"force,omitempty"`
+	// AllowShared permits a write to a note owned by another iCloud account,
+	// which syncs the change to its owner.
+	AllowShared bool `json:"allowShared,omitempty"`
 }
 
 type writeResponse struct {
@@ -155,22 +164,29 @@ func (c *Client) Create(ctx context.Context, folder, markdown string) (string, e
 }
 
 // Replace returns the formatting the rewrite flattened.
-func (c *Client) Replace(ctx context.Context, uuid, markdown string, force bool) ([]string, error) {
+func (c *Client) Replace(ctx context.Context, uuid, markdown string, force, allowShared bool) ([]string, error) {
 	var out writeResponse
 	err := c.do(ctx, http.MethodPut, "/v1/notes/"+url.PathEscape(uuid),
-		writeRequest{Markdown: markdown, Force: force}, &out)
+		writeRequest{Markdown: markdown, Force: force, AllowShared: allowShared}, &out)
 	return out.Degraded, err
 }
 
-func (c *Client) Append(ctx context.Context, uuid, markdown string) ([]string, error) {
+func (c *Client) Append(ctx context.Context, uuid, markdown string, allowShared bool) ([]string, error) {
 	var out writeResponse
 	err := c.do(ctx, http.MethodPost, "/v1/notes/"+url.PathEscape(uuid)+"/append",
-		writeRequest{Markdown: markdown}, &out)
+		writeRequest{Markdown: markdown, AllowShared: allowShared}, &out)
 	return out.Degraded, err
 }
 
-func (c *Client) Delete(ctx context.Context, uuid string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/notes/"+url.PathEscape(uuid), nil, nil)
+func (c *Client) Delete(ctx context.Context, uuid string, allowShared bool) error {
+	// A query parameter rather than a body: DELETE with a body is poorly
+	// supported by proxies and some clients drop it silently, which for a
+	// safety gate would fail open.
+	path := "/v1/notes/" + url.PathEscape(uuid)
+	if allowShared {
+		path += "?allowShared=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {

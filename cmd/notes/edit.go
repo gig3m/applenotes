@@ -28,11 +28,11 @@ func (l localStore) Fetch(ctx context.Context, uuid string) (string, error) {
 	return body.Markdown(), nil
 }
 
-func (l localStore) Write(ctx context.Context, uuid, markdown string, force bool) ([]string, error) {
+func (l localStore) Write(ctx context.Context, uuid, markdown string, force, allowShared bool) ([]string, error) {
 	if force {
-		return nil, l.writer.ReplaceForce(ctx, uuid, markdown)
+		return nil, l.writer.ReplaceForce(ctx, uuid, markdown, allowShared)
 	}
-	return l.writer.Replace(ctx, uuid, markdown)
+	return l.writer.Replace(ctx, uuid, markdown, allowShared)
 }
 
 type remoteStore struct{ c *client.Client }
@@ -48,15 +48,16 @@ func (r remoteStore) Fetch(ctx context.Context, uuid string) (string, error) {
 	return n.Markdown, nil
 }
 
-func (r remoteStore) Write(ctx context.Context, uuid, markdown string, force bool) ([]string, error) {
-	return r.c.Replace(ctx, uuid, markdown, force)
+func (r remoteStore) Write(ctx context.Context, uuid, markdown string, force, allowShared bool) ([]string, error) {
+	return r.c.Replace(ctx, uuid, markdown, force, allowShared)
 }
 
-func editNote(stderr io.Writer, dbPath, server, token, uuid string, force bool) error {
+func editNote(stderr io.Writer, dbPath, server, token, uuid string, force, allowShared bool) error {
 	ed := &edit.Editor{
-		Force:     force,
-		OnDegrade: func(f []string) { warnDegraded(stderr, f) },
-		Run:       edit.Runner(stderr),
+		Force:       force,
+		AllowShared: allowShared,
+		OnDegrade:   func(f []string) { warnDegraded(stderr, f) },
+		Run:         edit.Runner(stderr),
 	}
 	if server != "" {
 		c, err := remoteClient(server, token)

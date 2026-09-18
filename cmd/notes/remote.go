@@ -54,6 +54,11 @@ func remoteList(stdout io.Writer, server, token, folder string, deleted bool) er
 		if n.Locked {
 			title += "  [locked]"
 		}
+		if n.SharedWithMe {
+			title += "  [theirs]"
+		} else if n.Shared {
+			title += "  [shared]"
+		}
 		if n.Trashed {
 			title += "  [deleted]"
 		}
@@ -186,7 +191,7 @@ func remoteNew(stdin io.Reader, stdout, stderr io.Writer, server, token, folder 
 	return nil
 }
 
-func remoteAppend(stdin io.Reader, stderr io.Writer, server, token, uuid string) error {
+func remoteAppend(stdin io.Reader, stderr io.Writer, server, token, uuid string, allowShared bool) error {
 	md, err := readBody(stdin, "append")
 	if err != nil {
 		return err
@@ -195,7 +200,7 @@ func remoteAppend(stdin io.Reader, stderr io.Writer, server, token, uuid string)
 	if err != nil {
 		return err
 	}
-	degraded, err := c.Append(context.Background(), uuid, md)
+	degraded, err := c.Append(context.Background(), uuid, md, allowShared)
 	if err != nil {
 		return err
 	}
@@ -204,7 +209,7 @@ func remoteAppend(stdin io.Reader, stderr io.Writer, server, token, uuid string)
 	return nil
 }
 
-func remoteReplace(stdin io.Reader, stderr io.Writer, server, token, uuid string, force bool) error {
+func remoteReplace(stdin io.Reader, stderr io.Writer, server, token, uuid string, force, allowShared bool) error {
 	md, err := readBody(stdin, "replace a note with")
 	if err != nil {
 		return err
@@ -213,7 +218,7 @@ func remoteReplace(stdin io.Reader, stderr io.Writer, server, token, uuid string
 	if err != nil {
 		return err
 	}
-	degraded, err := c.Replace(context.Background(), uuid, md, force)
+	degraded, err := c.Replace(context.Background(), uuid, md, force, allowShared)
 	if err != nil {
 		return err
 	}
@@ -222,12 +227,12 @@ func remoteReplace(stdin io.Reader, stderr io.Writer, server, token, uuid string
 	return nil
 }
 
-func remoteRm(stderr io.Writer, server, token, uuid string) error {
+func remoteRm(stderr io.Writer, server, token, uuid string, allowShared bool) error {
 	c, err := remoteClient(server, token)
 	if err != nil {
 		return err
 	}
-	if err := c.Delete(context.Background(), uuid); err != nil {
+	if err := c.Delete(context.Background(), uuid, allowShared); err != nil {
 		return err
 	}
 	fmt.Fprintln(stderr, "notes: moved to Recently Deleted.")

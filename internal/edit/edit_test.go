@@ -23,7 +23,7 @@ func (f *fakeStore) Fetch(ctx context.Context, uuid string) (string, error) {
 	return f.body, f.fetchErr
 }
 
-func (f *fakeStore) Write(ctx context.Context, uuid, markdown string, force bool) ([]string, error) {
+func (f *fakeStore) Write(ctx context.Context, uuid, markdown string, force, allowShared bool) ([]string, error) {
 	f.written = append(f.written, markdown)
 	return nil, f.writeErr
 }

@@ -21,7 +21,7 @@ import (
 // and the HTTP client satisfy it.
 type Store interface {
 	Fetch(ctx context.Context, uuid string) (string, error)
-	Write(ctx context.Context, uuid, markdown string, force bool) ([]string, error)
+	Write(ctx context.Context, uuid, markdown string, force, allowShared bool) ([]string, error)
 }
 
 type Editor struct {
@@ -33,6 +33,12 @@ type Editor struct {
 	// Force passes through to the write, for a note whose content the rewrite
 	// would destroy.
 	Force bool
+
+	// AllowShared passes through to the write, for a note owned by another
+	// iCloud account. Separate from Force because it is a different question:
+	// one is about losing formatting, the other about editing in someone
+	// else's account.
+	AllowShared bool
 
 	// OnDegrade is called with the formatting the write flattened.
 	OnDegrade func(features []string)
@@ -95,7 +101,7 @@ func (e *Editor) Edit(ctx context.Context, uuid string) (wrote bool, err error) 
 		return false, fmt.Errorf("refusing to empty the note; nothing was written")
 	}
 
-	degraded, err := e.Store.Write(ctx, uuid, string(edited), e.Force)
+	degraded, err := e.Store.Write(ctx, uuid, string(edited), e.Force, e.AllowShared)
 	if err != nil {
 		// The buffer stays: the work in it is the user's, and the write may be
 		// retryable with force.

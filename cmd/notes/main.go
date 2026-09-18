@@ -66,6 +66,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	token := fs.String("token", "", "bearer token for -server (default: $NOTESD_TOKEN, or ~/.config/applenotes/token)")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
 	rawRuns := fs.Bool("raw", false, "decode: dump the attribute runs instead of Markdown")
+	shared := fs.Bool("shared", false, "write to a note owned by another iCloud account (syncs the change to its owner)")
 	rest := args[1:]
 	if permutable[cmd] {
 		var err error
@@ -163,33 +164,33 @@ The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
 			return usageErr("append needs exactly one note UUID")
 		}
 		if *server != "" {
-			err = remoteAppend(stdin, stderr, *server, *token, fs.Arg(0))
+			err = remoteAppend(stdin, stderr, *server, *token, fs.Arg(0), *shared)
 			break
 		}
-		err = appendNote(stdin, stderr, *dbPath, fs.Arg(0))
+		err = appendNote(stdin, stderr, *dbPath, fs.Arg(0), *shared)
 	case "replace":
 		if fs.NArg() != 1 {
 			return usageErr("replace needs exactly one note UUID")
 		}
 		if *server != "" {
-			err = remoteReplace(stdin, stderr, *server, *token, fs.Arg(0), *force)
+			err = remoteReplace(stdin, stderr, *server, *token, fs.Arg(0), *force, *shared)
 			break
 		}
-		err = replaceNote(stdin, stderr, *dbPath, fs.Arg(0), *force)
+		err = replaceNote(stdin, stderr, *dbPath, fs.Arg(0), *force, *shared)
 	case "rm":
 		if fs.NArg() != 1 {
 			return usageErr("rm needs exactly one note UUID")
 		}
 		if *server != "" {
-			err = remoteRm(stderr, *server, *token, fs.Arg(0))
+			err = remoteRm(stderr, *server, *token, fs.Arg(0), *shared)
 			break
 		}
-		err = rmNote(stderr, *dbPath, fs.Arg(0))
+		err = rmNote(stderr, *dbPath, fs.Arg(0), *shared)
 	case "edit":
 		if fs.NArg() != 1 {
 			return usageErr("edit needs exactly one note UUID")
 		}
-		err = editNote(stderr, *dbPath, *server, *token, fs.Arg(0), *force)
+		err = editNote(stderr, *dbPath, *server, *token, fs.Arg(0), *force, *shared)
 	case "capture":
 		err = captureNote(stdin, stdout, stderr, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "))
 	case "search":
@@ -278,6 +279,14 @@ func list(stdout io.Writer, path, folder string, deleted bool) error {
 		}
 		if n.Locked {
 			title += "  [locked]"
+		}
+		// A note owned by another account is read-only unless the write opts
+		// in, so it is marked -- otherwise the refusal arrives as a surprise
+		// only once someone tries to edit it.
+		if n.SharedWithMe() {
+			title += "  [theirs]"
+		} else if n.SharedByMe() {
+			title += "  [shared]"
 		}
 		// Trashed, not Deleted: a note reaches the trash by more than one
 		// route and the flag alone misses some of them.
@@ -390,7 +399,7 @@ func warnLag(stderr io.Writer) {
 			"       schedule, so this may not appear in list/show for a while.")
 }
 
-func appendNote(stdin io.Reader, stderr io.Writer, path, uuid string) error {
+func appendNote(stdin io.Reader, stderr io.Writer, path, uuid string, allowShared bool) error {
 	md, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
@@ -404,7 +413,11 @@ func appendNote(stdin io.Reader, stderr io.Writer, path, uuid string) error {
 	}
 	defer s.Close()
 
-	degraded, err := w.Append(context.Background(), uuid, string(md))
+	degraded, err := w.Append(context.Background(), uuid, string(md), allowShared)
+	var shared *notesapp.ErrSharedNote
+	if errors.As(err, &shared) {
+		return sharedAdvice(err)
+	}
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
 		return fmt.Errorf("%w.\n"+
@@ -419,7 +432,7 @@ func appendNote(stdin io.Reader, stderr io.Writer, path, uuid string) error {
 	return nil
 }
 
-func replaceNote(stdin io.Reader, stderr io.Writer, path, uuid string, force bool) error {
+func replaceNote(stdin io.Reader, stderr io.Writer, path, uuid string, force, allowShared bool) error {
 	md, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
@@ -434,14 +447,18 @@ func replaceNote(stdin io.Reader, stderr io.Writer, path, uuid string, force boo
 	defer s.Close()
 
 	if force {
-		if err := w.ReplaceForce(context.Background(), uuid, string(md)); err != nil {
+		if err := w.ReplaceForce(context.Background(), uuid, string(md), allowShared); err != nil {
 			return err
 		}
 		warnLag(stderr)
 		return nil
 	}
 
-	degraded, err := w.Replace(context.Background(), uuid, string(md))
+	degraded, err := w.Replace(context.Background(), uuid, string(md), allowShared)
+	var shared *notesapp.ErrSharedNote
+	if errors.As(err, &shared) {
+		return sharedAdvice(err)
+	}
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
 		return fmt.Errorf("%w.\n"+
@@ -456,13 +473,13 @@ func replaceNote(stdin io.Reader, stderr io.Writer, path, uuid string, force boo
 	return nil
 }
 
-func rmNote(stderr io.Writer, path, uuid string) error {
+func rmNote(stderr io.Writer, path, uuid string, allowShared bool) error {
 	s, w, err := writer(path)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	if err := w.Delete(context.Background(), uuid); err != nil {
+	if err := w.Delete(context.Background(), uuid, allowShared); err != nil {
 		return err
 	}
 	warnLag(stderr)
@@ -683,4 +700,12 @@ func permute(fs *flag.FlagSet, args []string) ([]string, error) {
 		return flags, nil
 	}
 	return append(append(flags, "--"), positional...), nil
+}
+
+// sharedAdvice explains the one way past the ownership gate, and what taking it
+// means. A refusal that does not say how to proceed reads as a bug.
+func sharedAdvice(err error) error {
+	return fmt.Errorf("%w.\n"+
+		"       Pass -shared to write it anyway; the change syncs to the owner\n"+
+		"       and to everyone else on the share", err)
 }

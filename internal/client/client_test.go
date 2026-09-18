@@ -81,7 +81,7 @@ func TestRefusedRewriteIsTyped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, testToken).Replace(context.Background(), "UUID", "x", false)
+	_, err := New(srv.URL, testToken).Replace(context.Background(), "UUID", "x", false, false)
 	var refused *RefusedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("got %v, want a RefusedError", err)
@@ -128,7 +128,7 @@ func TestDegradedFormattingIsCarriedBack(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	degraded, err := New(srv.URL, testToken).Replace(context.Background(), "UUID", "x", false)
+	degraded, err := New(srv.URL, testToken).Replace(context.Background(), "UUID", "x", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
