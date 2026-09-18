@@ -13,10 +13,14 @@ var errWireType = errors.New("unexpected wire type")
 
 // Policy on malformed fields: only AttributeRun.length is fatal, because
 // reading it as zero silently misaligns every run that follows. Every other
-// scalar, and every nested submessage, costs at most a few attributes, so it is
-// skipped rather than failing the whole note -- this is a read-only extraction
-// tool, and a note that renders slightly wrong beats a note that will not open
-// at all if Apple ever re-types a field.
+// scalar, and every submessage below AttributeRun, costs at most a few
+// attributes, so it is skipped rather than failing the whole note -- this is a
+// read-only extraction tool, and a note that renders slightly wrong beats a
+// note that will not open at all if Apple ever re-types a field.
+//
+// A structural failure in Document, Note or AttributeRun itself is still fatal:
+// if a run body cannot be parsed, its length may be unread, and every offset
+// after it would be wrong.
 
 // Paragraph style types used by Notes. Anything unrecognised falls back to body
 // text rather than being dropped.

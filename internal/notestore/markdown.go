@@ -284,7 +284,7 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 	}
 
 	var b strings.Builder
-	for _, s := range spans {
+	for _, s := range mergeSpans(spans) {
 		t := s.text
 		if t == "" {
 			continue
@@ -301,6 +301,7 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		core := strings.TrimRightFunc(rest, unicode.IsSpace)
 		trail := rest[len(core):]
 		if core == "" {
+			// Also guards codeSpan, which has no sensible empty form.
 			b.WriteString(t)
 			continue
 		}
@@ -328,6 +329,28 @@ func renderSpans(spans []span, wholeLineMono bool) string {
 		b.WriteString(lead + core + trail)
 	}
 	return escapeLineStart(b.String())
+}
+
+// mergeSpans joins neighbouring spans that resolve to the same styling. Runs
+// often differ only in attributes this renderer ignores (colour, underline),
+// and leaving them split would let a character reference straddle a boundary
+// and survive escaping.
+func mergeSpans(spans []span) []span {
+	if len(spans) < 2 {
+		return spans
+	}
+	out := make([]span, 0, len(spans))
+	for _, s := range spans {
+		if n := len(out); n > 0 && s.attachment == nil && out[n-1].attachment == nil &&
+			out[n-1].bold == s.bold && out[n-1].italic == s.italic &&
+			out[n-1].strike == s.strike && out[n-1].mono == s.mono &&
+			out[n-1].link == s.link {
+			out[n-1].text += s.text
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // codeSpan wraps text in backticks long enough to survive any backticks inside
@@ -404,7 +427,7 @@ func escapeText(s string) string {
 	b.Grow(len(s))
 	for i, r := range s {
 		switch r {
-		case '\\', '`', '*', '_', '[', ']', '<', '>':
+		case '\\', '`', '*', '_', '[', ']', '<', '>', '~':
 			b.WriteByte('\\')
 		case '&':
 			// Only an & that could begin a character reference needs escaping;
@@ -493,6 +516,13 @@ func escapeURL(u string) string {
 			b.WriteString("%3C")
 		case r == '>':
 			b.WriteString("%3E")
+		case r == '\\':
+			// A backslash escapes the next character inside a destination, so
+			// it would be eaten -- or, in the wrapped form, would escape the
+			// closing bracket and break the link entirely.
+			b.WriteString("%5C")
+		case r == '&':
+			b.WriteString("%26")
 		case unicode.IsSpace(r) || unicode.IsControl(r):
 			// Whitespace is illegal in a destination even inside <>, so it is
 			// percent-encoded. RFC 3986 encodes UTF-8 octets, not code points:

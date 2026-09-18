@@ -162,6 +162,7 @@ func TestBodyTextIsNotReinterpretedAsMarkup(t *testing.T) {
 		{"  \tindented", "&#32; \tindented"},
 		{"Smith & Jones", "Smith & Jones"},
 		{"literal &#32; here", "literal \\&#32; here"},
+		{"~~~", "\\~\\~\\~"},
 	} {
 		got := decode(t, blob(tc.text, run(len(tc.text), 0, -2, ""))).Markdown()
 		if got != tc.want {
@@ -202,14 +203,16 @@ func TestLoneNewlineRunDoesNotBleedForward(t *testing.T) {
 }
 
 func TestOrderedListNumbering(t *testing.T) {
-	t.Run("blank line neither consumes a number nor restarts", func(t *testing.T) {
-		got := decode(t, blob("a\n\nb",
-			run(2, 0, StyleNumList, ""), run(1, 0, StyleBody, ""), run(1, 0, StyleNumList, ""))).Markdown()
-		want := "1. a\n\n2. b"
-		if got != want {
-			t.Errorf("got %q want %q", got, want)
-		}
-	})
+	for name, sep := range map[string]int{"separator as body": StyleBody, "separator as list item": StyleNumList} {
+		t.Run("blank line neither consumes a number nor restarts, "+name, func(t *testing.T) {
+			got := decode(t, blob("a\n\nb",
+				run(2, 0, StyleNumList, ""), run(1, 0, sep, ""), run(1, 0, StyleNumList, ""))).Markdown()
+			want := "1. a\n\n2. b"
+			if got != want {
+				t.Errorf("got %q want %q", got, want)
+			}
+		})
+	}
 	t.Run("ending a list ends its nested levels", func(t *testing.T) {
 		got := decode(t, blob("a\nb\nc\nd",
 			runIndent(2, StyleNumList, 0), runIndent(2, StyleNumList, 1),
@@ -321,6 +324,34 @@ func TestNegativeLengthEmitsTailUnstyled(t *testing.T) {
 		run(1, FontBold, -2, ""), fVarint(1, 0xFFFFFFFF), run(1, FontItalic, -2, ""))).Markdown()
 	if want := "**a**bcd"; got != want {
 		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// A tilde fence is core CommonMark, so an unescaped "~~~" line would swallow
+// every following line of the note into a code block.
+func TestTildeFenceIsEscaped(t *testing.T) {
+	got := decode(t, blob("~~~\nsecret", run(4, 0, -2, ""), run(6, 0, -2, ""))).Markdown()
+	if strings.HasPrefix(got, "~~~") {
+		t.Errorf("tilde fence not escaped: %q", got)
+	}
+}
+
+// Runs often differ only in attributes the renderer ignores. If adjacent spans
+// are not merged, a character reference can straddle the boundary and escape
+// escaping.
+func TestEntitySplitAcrossRunsIsEscaped(t *testing.T) {
+	got := decode(t, blob("&amp;", run(1, 0, -2, ""), run(4, 0, -2, ""))).Markdown()
+	if want := "\\&amp;"; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// A backslash in a destination escapes the next character, and in the wrapped
+// form would escape the closing bracket and destroy the link.
+func TestBackslashInURLIsEncoded(t *testing.T) {
+	got := decode(t, blob("t", run(1, 0, -2, "https://x/(a\\"))).Markdown()
+	if strings.Contains(got, "\\") {
+		t.Errorf("raw backslash survived in destination: %q", got)
 	}
 }
 
