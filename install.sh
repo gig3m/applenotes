@@ -141,13 +141,23 @@ printf 'bin=%s\nplist=%s\nlabel=%s\n' "$BIN" "$PLIST" "$LABEL" > "$STATE"
 
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
-sleep 2
 
 # launchctl list reports a crash-looping job as present, so ask the daemon
-# itself rather than trusting that it is there.
-if ! curl -fsS -m 5 -H "Authorization: Bearer $(cat "$TOKEN" 2>/dev/null)" \
-	"http://${ADDR}/v1/healthz" >/dev/null 2>&1; then
-	echo "install: the agent did not answer on $ADDR" >&2
+# itself rather than trusting that it is there. notesd generates the token on
+# its first run, so this waits for the file to appear before using it -- reading
+# it too early would send an empty bearer and report a false failure.
+ok=""
+for _ in $(seq 1 20); do
+	sleep 0.5
+	[[ -s "$TOKEN" ]] || continue
+	if curl -fsS -m 3 -H "Authorization: Bearer $(cat "$TOKEN")" \
+		"http://${ADDR}/v1/healthz" >/dev/null 2>&1; then
+		ok=yes
+		break
+	fi
+done
+if [[ -z "$ok" ]]; then
+	echo "install: the agent did not answer on $ADDR within 10s" >&2
 	echo "install: see $HOME/Library/Logs/notesd.log" >&2
 	echo "install: run ./uninstall.sh to undo this" >&2
 	exit 1
@@ -165,7 +175,7 @@ front, which also gives you TLS:
 
 then from the Linux side:
 
-  export NOTESD_URL=https://$(hostname -s).\$TAILNET.ts.net
+  export NOTESD_URL=https://$(hostname -s | tr "[:upper:]" "[:lower:]").\$TAILNET.ts.net
   export NOTESD_TOKEN=\$(ssh $(hostname -s) cat $TOKEN)
   notes list
 
