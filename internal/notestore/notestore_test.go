@@ -77,6 +77,12 @@ func runCheck(length int, done bool) []byte {
 	return append(fVarint(1, uint64(length)), fBytes(2, ps)...)
 }
 
+func runQuote(length int) []byte {
+	style := int32(StyleBody) // via a variable: int32(-1) is rejected as an untyped constant
+	ps := append(fVarint(1, uint64(style)), fVarint(8, 1)...)
+	return append(fVarint(1, uint64(length)), fBytes(2, ps)...)
+}
+
 func runAttach(length int, id, uti string) []byte {
 	ai := append(fBytes(1, []byte(id)), fBytes(2, []byte(uti))...)
 	return append(fVarint(1, uint64(length)), fBytes(12, ai)...)
@@ -173,8 +179,8 @@ func TestBodyTextIsNotReinterpretedAsMarkup(t *testing.T) {
 		{"# not a heading", "\\# not a heading"},
 		{"- not a bullet", "\\- not a bullet"},
 		{"1986. What a year", "1986\\. What a year"},
-		{"    indented", "&#32;   indented"},
-		{"  \tindented", "&#32; \tindented"},
+		{"    indented", "&#160;   indented"},
+		{"  \tindented", "&#160; \tindented"},
 		{"Smith & Jones", "Smith & Jones"},
 		{"literal &#32; here", "literal \\&#32; here"},
 		{"~~~", "\\~\\~\\~"},
@@ -451,7 +457,8 @@ func TestLossyDetectsUnrepresentableContent(t *testing.T) {
 		{"attachment", [][]byte{runAttach(1, "ID", "public.jpeg")}, "attachments"},
 		{"checklist", [][]byte{runCheck(4, false)}, "checklists"},
 		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
-		{"nested list", [][]byte{runIndent(4, StyleDotList, 1)}, "indented or nested lists"},
+		{"nested list", [][]byte{runIndent(4, StyleDotList, 1)}, "indentation"},
+		{"block quote", [][]byte{runQuote(4)}, "block quotes"},
 	} {
 		n := decode(t, blob("text", tc.runs...))
 		got := n.Lossy()
@@ -477,4 +484,29 @@ func TestLossyAllowsPlainNotes(t *testing.T) {
 	if got := n.Lossy(); len(got) != 0 {
 		t.Errorf("plain note reported lossy: %v", got)
 	}
+}
+
+// An attachment run that also carries a link must not be folded into the link
+// group: doing so nested one set of brackets inside another.
+func TestAttachmentInsideLinkIsNotGrouped(t *testing.T) {
+	const url = "https://x.test/d"
+	got := decode(t, blob("a￼b",
+		run(1, 0, -2, url),
+		runAttachLink(1, "ID", "public.jpeg", url),
+		run(1, 0, -2, url))).Markdown()
+	// The attachment ends the link group, so the text either side is linked
+	// separately. What must not happen is the attachment's own brackets being
+	// nested inside the surrounding link.
+	if strings.Contains(got, "[a[") || strings.Contains(got, "]b](") {
+		t.Errorf("nested link brackets: %q", got)
+	}
+	if !strings.Contains(got, "applenotes:attachment/ID") {
+		t.Errorf("attachment lost: %q", got)
+	}
+}
+
+func runAttachLink(length int, id, uti, link string) []byte {
+	ai := append(fBytes(1, []byte(id)), fBytes(2, []byte(uti))...)
+	b := append(fVarint(1, uint64(length)), fBytes(12, ai)...)
+	return append(b, fBytes(9, []byte(link))...)
 }

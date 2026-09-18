@@ -210,12 +210,17 @@ func TestTextSurvivesRenderThenConvert(t *testing.T) {
 		"snake_case_name", "*star*", "__dunder__", "x`y`z", "[a](b)",
 		"**", "a_b_c", "~~x~~", "# not a heading", "1986. what a year",
 		"a < b & c > d", "back\\slash", "&#32; literal", "  indented",
+		"= not a setext", "=== separator", "a  b", "trailing  ",
+		"a<b>c", "]", "&nbsp; literal",
 	} {
 		// Build a note whose body is exactly this text, render it, convert it
 		// back, and check no character was lost.
 		md := decode(t, blob(text, run(len(utf16.Encode([]rune(text))), 0, -2, ""))).Markdown()
 		html := ToHTML(md)
-		if got := htmlToText(html); got != text {
+		// Leading and repeated spaces are emitted as non-breaking spaces: a
+		// plain space is collapsed away by HTML, so preserving the text's
+		// appearance costs the exact character. Normalise before comparing.
+		if got := strings.ReplaceAll(htmlToText(html), " ", " "); got != text {
 			t.Errorf("round trip changed %q -> md %q -> %q", text, md, got)
 		}
 	}

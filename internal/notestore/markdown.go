@@ -552,8 +552,10 @@ func escapeLineStart(s string) string {
 			// Replacing just the first character with its numeric reference
 			// stops the line beginning with whitespace while keeping the rest
 			// of the indentation intact.
-			first, size := utf8.DecodeRuneInString(s)
-			return fmt.Sprintf("&#%d;", first) + s[size:]
+			// &#160;, not &#32;: a plain space would be collapsed away when
+			// this Markdown is converted back to HTML.
+			_, size := utf8.DecodeRuneInString(s)
+			return "&#160;" + s[size:]
 		}
 	}
 	r, size := utf8.DecodeRuneInString(trimmed)
@@ -632,19 +634,36 @@ func (n *Note) Lossy() []string {
 		if r.Attachment != nil {
 			add("attachments")
 		}
+		// Decoded but never rendered, so a rewrite drops them.
+		if r.Underlined {
+			add("underlining")
+		}
+		if r.Superscript != 0 {
+			add("superscript or subscript")
+		}
 		if r.ParagraphStyle == nil {
 			continue
 		}
-		switch ps := r.ParagraphStyle; {
-		case ps.Checklist != nil, ps.StyleType == StyleChecklist:
+		// Not a switch: a run can carry several of these at once, and each
+		// needs naming so the explanation is complete.
+		ps := r.ParagraphStyle
+		if ps.Checklist != nil || ps.StyleType == StyleChecklist {
 			add("checklists")
-		case ps.StyleType == StyleSubhead:
+		}
+		if ps.StyleType == StyleSubhead {
 			add("subheadings")
-		case ps.BlockQuote != 0:
+		}
+		if ps.StyleType == StyleMonospace {
+			add("monospaced paragraphs")
+		}
+		if ps.BlockQuote != 0 {
 			add("block quotes")
 		}
-		if r.ParagraphStyle.IndentAmount > 0 {
-			add("indented or nested lists")
+		if ps.IndentAmount > 0 {
+			add("indentation")
+		}
+		if ps.Alignment != 0 {
+			add("paragraph alignment")
 		}
 	}
 	return out

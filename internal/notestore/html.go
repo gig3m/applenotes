@@ -31,7 +31,9 @@ func ToHTML(md string) string {
 		}
 		return r
 	}, md)
-	lines := strings.Split(strings.TrimRight(md, "\n \t"), "\n")
+	// Only line terminators are trimmed. Trimming spaces here as well would
+	// take them off the last line, which is content.
+	lines := strings.Split(strings.TrimRight(md, "\n"), "\n")
 
 	listKind := "" // "ul", "ol", or ""
 	inFence := false
@@ -132,15 +134,9 @@ func ToHTML(md string) string {
 		}
 
 		closeList()
-		// Leading whitespace is content, but HTML collapses it, so it is
-		// emitted as character references.
-		body := strings.TrimRight(line, " \t\r\n")
-		lead := body[:len(body)-len(strings.TrimLeft(body, " \t"))]
-		var indent strings.Builder
-		for _, r := range lead {
-			fmt.Fprintf(&indent, "&#%d;", r)
-		}
-		fmt.Fprintf(&b, "<div>%s%s</div>", indent.String(), inline(strings.TrimLeft(body, " \t")))
+		// Only the line terminator is trimmed: leading, interior and trailing
+		// whitespace are all note content, and escapeInline keeps them.
+		fmt.Fprintf(&b, "<div>%s</div>", inline(strings.TrimRight(line, "\r\n")))
 	}
 	closeList()
 	out := b.String()
@@ -281,6 +277,18 @@ func escapeInline(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c == ' ' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+			// A leading space, or the second and later space of a run, would be
+			// collapsed away. Only a non-breaking space survives; a numeric
+			// reference to U+0020 does not, because it is still a space by the
+			// time layout runs.
+			b.WriteString("&#160;")
+			continue
+		}
+		if c == '\t' {
+			b.WriteString("&#160;&#160;&#160;&#160;")
+			continue
+		}
 		if c == '\\' && i+1 < len(s) && isMarkdownPunct(s[i+1]) {
 			i++
 			fmt.Fprintf(&b, "&#%d;", s[i])
@@ -312,7 +320,7 @@ func escapeInline(s string) string {
 }
 
 func isMarkdownPunct(c byte) bool {
-	return strings.IndexByte("\\`*_[]<>~#+-.!()&{}|\"'", c) >= 0
+	return strings.IndexByte("\\`*_[]<>~#+-.!()&{}|=\"'", c) >= 0
 }
 
 // entityLen returns the length of a character reference at the start of s, or 0.
@@ -344,19 +352,4 @@ func emphasis(s string) string {
 	s = italicRe.ReplaceAllString(s, "$1$3<i>$2$4</i>")
 	s = strikeRe.ReplaceAllString(s, "<s>$1</s>")
 	return s
-}
-
-// unescapeMarkdown turns backslash escapes back into their literal character,
-// so text this package's own renderer escaped survives a round trip.
-func unescapeMarkdown(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte("\\`*_[]<>~#+-.!()&", s[i+1]) >= 0 {
-			i++
-			b.WriteByte(s[i])
-			continue
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
 }

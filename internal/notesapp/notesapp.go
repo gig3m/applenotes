@@ -110,7 +110,7 @@ func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
 	if existing != "" {
 		existing += "\n"
 	}
-	return w.Replace(ctx, uuid, existing+markdown)
+	return w.ReplaceForce(ctx, uuid, existing+markdown)
 }
 
 const replaceScript = `on run argv
@@ -122,7 +122,22 @@ const replaceScript = `on run argv
 end run`
 
 // Replace overwrites a note's entire body with Markdown.
+//
+// It refuses with *ErrLossyRewrite when the note holds content the new body
+// cannot carry, because the overwhelmingly common use is show-edit-replace and
+// that silently discards attachments, checklists and the rest. ReplaceForce
+// skips the check for a caller that genuinely means to discard them.
 func (w *Writer) Replace(ctx context.Context, uuid, markdown string) error {
+	if body, err := w.store.Body(uuid); err == nil {
+		if lossy := body.Lossy(); len(lossy) > 0 {
+			return &ErrLossyRewrite{Features: lossy}
+		}
+	}
+	return w.ReplaceForce(ctx, uuid, markdown)
+}
+
+// ReplaceForce overwrites a note's body without checking what that discards.
+func (w *Writer) ReplaceForce(ctx context.Context, uuid, markdown string) error {
 	id, err := w.store.ScriptID(uuid)
 	if err != nil {
 		return err

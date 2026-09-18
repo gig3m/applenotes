@@ -146,8 +146,16 @@ something: reading through AppleScript drops every hyperlink, and rewriting from
 Markdown drops anything Markdown cannot express.
 
 So `append` reads the body from SQLite, which keeps links, and **refuses**
-rather than damaging a note that holds attachments, checklists, block quotes,
-subheadings or nested lists. Add to those in Notes.app instead.
+rather than damaging a note holding anything the rewrite cannot carry:
+attachments, checklists, block quotes, subheadings, monospaced paragraphs,
+indentation, alignment, underlining, superscript. `replace` refuses on the same
+grounds — pass `-force` to overwrite anyway. Edit those notes in Notes.app
+instead.
+
+Leading and repeated spaces are written as non-breaking spaces, because a plain
+space is collapsed away by HTML. Indentation and the double space after a full
+stop therefore survive a round trip, at the cost of the exact character: what
+comes back is U+00A0, not U+0020.
 
 Two caveats apply even when it succeeds: the read comes from the database, so an
 edit still buffered in Notes.app is not merely missed but **overwritten**; and

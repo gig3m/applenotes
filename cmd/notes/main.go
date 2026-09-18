@@ -37,6 +37,7 @@ func main() {
 	// refactor dereferences.
 	folder := fs.String("folder", "", "list: limit to a folder, by name or UUID")
 	deleted := fs.Bool("deleted", false, "list: include notes in Recently Deleted")
+	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
 	// fs uses ExitOnError, so Parse never returns on failure.
 	fs.Parse(os.Args[2:])
 
@@ -71,7 +72,7 @@ func main() {
 		if fs.NArg() != 1 {
 			fatalUsage("replace needs exactly one note UUID")
 		}
-		err = replaceNote(*dbPath, fs.Arg(0))
+		err = replaceNote(*dbPath, fs.Arg(0), *force)
 	case "rm":
 		if fs.NArg() != 1 {
 			fatalUsage("rm needs exactly one note UUID")
@@ -110,7 +111,7 @@ commands:
   show <uuid>                      print one note as Markdown
   new [-folder NAME]               create a note from Markdown on stdin
   append <uuid>                    append Markdown from stdin to a note
-  replace <uuid>                   overwrite a note with Markdown from stdin
+  replace [-force] <uuid>          overwrite a note with Markdown from stdin
   rm <uuid>                        move a note to Recently Deleted
   decode                           decode a raw ZICNOTEDATA blob on stdin
 
@@ -271,7 +272,7 @@ func appendNote(path, uuid string) error {
 	return nil
 }
 
-func replaceNote(path, uuid string) error {
+func replaceNote(path, uuid string, force bool) error {
 	md, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
