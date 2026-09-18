@@ -33,6 +33,17 @@ import (
 // portable note UUIDs into the machine-local ids AppleScript addresses.
 type Writer struct {
 	store *notestore.Store
+
+	// OnDegrade, if set, is called before a write that will flatten
+	// formatting, with the names of what will be lost. Nothing is destroyed,
+	// but the caller is the only one who can tell the user.
+	OnDegrade func(features []string)
+}
+
+func (w *Writer) warn(features []string) {
+	if w.OnDegrade != nil && len(features) > 0 {
+		w.OnDegrade(features)
+	}
 }
 
 func New(s *notestore.Store) *Writer { return &Writer{store: s} }
@@ -135,12 +146,22 @@ func (w *Writer) Replace(ctx context.Context, uuid, markdown string) error {
 	// exactly the case where least is known and most could be lost -- so an
 	// unreadable note is refused rather than silently overwritten.
 	body, err := w.store.Body(uuid)
+	if errors.Is(err, notestore.ErrNotFound) {
+		// Either no such note, or one whose body cannot be read -- a locked
+		// note, say. Both refuse, but they are different situations and a
+		// caller needs to tell them apart.
+		if _, metaErr := w.store.Meta(uuid); metaErr != nil {
+			return err
+		}
+		return fmt.Errorf("this note's body cannot be read, so what a rewrite would destroy cannot be checked; pass force to overwrite it anyway: %w", err)
+	}
 	if err != nil {
 		return fmt.Errorf("cannot check what this rewrite would destroy: %w", err)
 	}
 	if lost := body.Destroys(); len(lost) > 0 {
 		return &ErrLossyRewrite{Features: lost}
 	}
+	w.warn(body.Degrades())
 	return w.ReplaceForce(ctx, uuid, markdown)
 }
 

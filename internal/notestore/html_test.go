@@ -279,6 +279,14 @@ func TestWhitespaceIsNonBreaking(t *testing.T) {
 		{"trailing", "a ", "<div>a&#160;</div>"},
 		{"tab", "\ta", "<div>&#160;&#160;&#160;&#160;a</div>"},
 		{"single interior space untouched", "a b", "<div>a b</div>"},
+		// Every block branch, not just the paragraph one: an earlier version
+		// matched markers against a TrimSpace'd line and deleted the item's
+		// own whitespace.
+		{"bullet trailing", "- hello ", "<ul><li>hello&#160;</li></ul>"},
+		{"bullet leading", "-   lead", "<ul><li>&#160;&#160;lead</li></ul>"},
+		{"heading trailing", "## hello ", "<h2>hello&#160;</h2>"},
+		{"numbered trailing", "1. n ", "<ol><li>n&#160;</li></ol>"},
+		{"quote trailing", "> q ", "<div>&gt; q&#160;</div>"},
 	} {
 		if got := ToHTML(tc.md); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)

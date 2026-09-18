@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/gig3m/applenotes/internal/notesapp"
@@ -205,7 +206,13 @@ func writer(path string) (*notestore.Store, *notesapp.Writer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return s, notesapp.New(s), nil
+	w := notesapp.New(s)
+	w.OnDegrade = func(features []string) {
+		fmt.Fprintf(os.Stderr,
+			"notes: this rewrite will flatten %s. No text is lost.\n",
+			strings.Join(features, ", "))
+	}
+	return s, w, nil
 }
 
 func newNote(path, folder string) error {

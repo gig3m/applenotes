@@ -43,9 +43,13 @@ func TestAppendRefusesToDestroyContent(t *testing.T) {
 // guard and fails later, at the Apple Event.
 func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 	w := New(openFixture(t))
-	var lossy *ErrLossyRewrite
-	if err := w.Replace(context.Background(), "UUID-PLAIN", "new body"); errors.As(err, &lossy) {
-		t.Errorf("a plain note was refused: %v", err)
+	// UUID-DEGRADED is an indented, underlined note -- the exact shape that a
+	// previous version refused permanently, with no way to override it.
+	for _, uuid := range []string{"UUID-PLAIN", "UUID-DEGRADED"} {
+		var lossy *ErrLossyRewrite
+		if err := w.Replace(context.Background(), uuid, "new body"); errors.As(err, &lossy) {
+			t.Errorf("%s was refused: %v", uuid, err)
+		}
 	}
 }
 
@@ -81,7 +85,8 @@ func openFixture(t *testing.T) *notestore.Store {
 		`INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE1, ZNOTEDATA) VALUES
 			(1, 'UUID-ATTACH', 'Has attachment', 10),
 			(2, 'UUID-PLAIN', 'Plain', 11),
-			(3, 'UUID-MISSING', 'Unreadable', 12)`,
+			(3, 'UUID-MISSING', 'Unreadable', 12),
+			(4, 'UUID-DEGRADED', 'Indented and underlined', 13)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatalf("%v\n%s", err, q)
@@ -96,6 +101,7 @@ func openFixture(t *testing.T) *notestore.Store {
 		{10, 1, noteBlob(t, true)},
 		{11, 2, noteBlob(t, false)},
 		{12, 3, []byte("not gzip")},
+		{13, 4, degradedBlob(t)},
 	} {
 		if _, err := db.Exec(`INSERT INTO ZICNOTEDATA VALUES (?, ?, ?)`, r.pk, r.note, r.blob); err != nil {
 			t.Fatal(err)
@@ -109,6 +115,41 @@ func openFixture(t *testing.T) *notestore.Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// degradedBlob builds a note with indentation and underlining: formatting a
+// rewrite flattens, which must not block the write.
+func degradedBlob(t *testing.T) []byte {
+	t.Helper()
+	varint := func(v uint64) []byte {
+		var b []byte
+		for v >= 0x80 {
+			b = append(b, byte(v)|0x80)
+			v >>= 7
+		}
+		return append(b, byte(v))
+	}
+	field := func(num int, data []byte) []byte {
+		out := append(varint(uint64(num)<<3|2), varint(uint64(len(data)))...)
+		return append(out, data...)
+	}
+	vfield := func(num int, v uint64) []byte {
+		return append(varint(uint64(num)<<3), varint(v)...)
+	}
+
+	style := append(vfield(1, 100), vfield(4, 1)...) // dot list, indent 1
+	run := append(vfield(1, 4), field(2, style)...)
+	run = append(run, vfield(6, 1)...) // underlined
+	note := append(field(2, []byte("text")), field(5, run)...)
+	raw := field(2, append(vfield(2, 1), field(3, note)...))
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	zw.Close()
+	return buf.Bytes()
 }
 
 // noteBlob builds a ZICNOTEDATA blob: a gzipped protobuf of one text run,

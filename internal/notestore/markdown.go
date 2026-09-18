@@ -621,6 +621,13 @@ func escapeURL(u string) string {
 func (n *Note) Destroys() []string {
 	var out []string
 	add := adder(&out)
+	// The object-replacement character marks an attachment's slot in the text.
+	// Keying only on decoded metadata would fail open when the submessage is
+	// malformed or Apple re-types it -- the decoder skips such a field by
+	// design -- and the attachment would then be destroyed silently.
+	if strings.ContainsRune(n.Text, objectReplacement) {
+		add("attachments")
+	}
 	for i := range n.Runs {
 		r := &n.Runs[i]
 		if r.Attachment != nil {

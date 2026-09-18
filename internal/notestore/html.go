@@ -65,8 +65,12 @@ func ToHTML(md string) string {
 		listKind = kind
 	}
 
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	for _, raw := range lines {
+		// Only the line terminator is removed here. The block patterns below
+		// match against the marker and hand back the rest of the line intact,
+		// so whitespace inside the item is content and survives.
+		line := strings.TrimRight(raw, "\r\n")
+		trimmed := strings.TrimLeft(line, " \t")
 
 		// Fenced code: emitted verbatim in a monospaced div, since Notes has no
 		// block-level code construct reachable through HTML. A fence marker is
@@ -88,7 +92,7 @@ func ToHTML(md string) string {
 			continue
 		}
 
-		if trimmed == "" {
+		if strings.TrimSpace(line) == "" {
 			closeList()
 			b.WriteString("<div><br></div>")
 			continue
@@ -140,9 +144,7 @@ func ToHTML(md string) string {
 		}
 
 		closeList()
-		// Only the line terminator is trimmed: leading, interior and trailing
-		// whitespace are all note content, and escapeInline keeps them.
-		fmt.Fprintf(&b, "<div>%s</div>", inline(strings.TrimRight(line, "\r\n")))
+		fmt.Fprintf(&b, "<div>%s</div>", inline(line))
 	}
 	closeList()
 	out := b.String()
@@ -155,10 +157,12 @@ func ToHTML(md string) string {
 }
 
 var (
-	headingRe = regexp.MustCompile(`^(#{1,6})\s+(.*)$`)
-	bulletRe  = regexp.MustCompile(`^([-*+])\s+(.*)$`)
-	numberRe  = regexp.MustCompile(`^\d+[.)]\s+(.*)$`)
-	quoteRe   = regexp.MustCompile(`^>\s?(.*)$`)
+	// One separator only. A greedy \s+ would swallow the item's own leading
+	// whitespace, which is content.
+	headingRe = regexp.MustCompile(`^(#{1,6})[ \t](.*)$`)
+	bulletRe  = regexp.MustCompile(`^([-*+])[ \t](.*)$`)
+	numberRe  = regexp.MustCompile(`^\d+[.)][ \t](.*)$`)
+	quoteRe   = regexp.MustCompile(`^>[ \t]?(.*)$`)
 	checkRe   = regexp.MustCompile(`^\[([ xX])\]\s+(.*)$`)
 	fenceRe   = regexp.MustCompile("^(`{3,}|~{3,})\\s*\\S*$")
 

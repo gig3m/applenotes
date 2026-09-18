@@ -461,6 +461,16 @@ func TestDestroysDetectsContentLoss(t *testing.T) {
 	}
 }
 
+// An attachment whose submessage failed to decode still occupies its slot in
+// the text. The guard must not fail open just because the metadata is
+// unreadable.
+func TestUndecodableAttachmentIsStillDestructive(t *testing.T) {
+	n := decode(t, blob("￼", run(1, 0, -2, "")))
+	if got := n.Destroys(); len(got) == 0 {
+		t.Error("an attachment with no decodable metadata was not reported")
+	}
+}
+
 // Degrades names formatting that would flatten. It must never block a write, so
 // it is reported separately from Destroys.
 func TestDegradesDetectsFormattingLoss(t *testing.T) {
@@ -535,8 +545,18 @@ func TestAttachmentInsideLinkIsNotGrouped(t *testing.T) {
 	// The attachment ends the link group, so the text either side is linked
 	// separately. What must not happen is the attachment's own brackets being
 	// nested inside the surrounding link.
-	if strings.Contains(got, "[[") {
-		t.Errorf("nested link brackets: %q", got)
+	// The invariant, not a hand-picked substring: no "[" may appear between a
+	// link's opening bracket and its "](", or one link is nested in another.
+	for i := 0; i < len(got); i++ {
+		if got[i] != '[' {
+			continue
+		}
+		if close := strings.Index(got[i+1:], "]("); close >= 0 {
+			if strings.ContainsRune(got[i+1:i+1+close], '[') {
+				t.Errorf("nested link brackets: %q", got)
+				break
+			}
+		}
 	}
 	if !strings.Contains(got, "applenotes:attachment/ID") {
 		t.Errorf("attachment lost: %q", got)
