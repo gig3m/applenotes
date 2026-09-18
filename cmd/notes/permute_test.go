@@ -63,7 +63,11 @@ func TestFlagsAfterPositionalsAreStillFlags(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := flagsLike()
-			if err := fs.Parse(permute(fs, tc.args)); err != nil {
+			got, err := permute(fs, tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.Parse(got); err != nil {
 				t.Fatal(err)
 			}
 			for name, want := range tc.want {
@@ -85,7 +89,11 @@ func TestDoubleDashProtectsTextThatLooksLikeFlags(t *testing.T) {
 	// where it fell: a "--" that stays put would terminate parsing early and
 	// swallow the real arguments with it.
 	fs := flagsLike()
-	if err := fs.Parse(permute(fs, []string{"UUID", "--", "-force"})); err != nil {
+	got, err := permute(fs, []string{"UUID", "--", "-force"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Parse(got); err != nil {
 		t.Fatal(err)
 	}
 	if fs.Lookup("force").Value.String() != "false" {
@@ -96,7 +104,11 @@ func TestDoubleDashProtectsTextThatLooksLikeFlags(t *testing.T) {
 	}
 
 	fs = flagsLike()
-	if err := fs.Parse(permute(fs, []string{"-folder", "Work", "--", "-force", "-not-a-flag"})); err != nil {
+	got, err = permute(fs, []string{"-folder", "Work", "--", "-force", "-not-a-flag"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Parse(got); err != nil {
 		t.Fatal(err)
 	}
 	if got := fs.Lookup("folder").Value.String(); got != "Work" {
@@ -115,7 +127,11 @@ func TestDoubleDashProtectsTextThatLooksLikeFlags(t *testing.T) {
 func TestUnknownFlagIsStillAnError(t *testing.T) {
 	fs := flagsLike()
 	fs.SetOutput(&strings.Builder{})
-	if err := fs.Parse(permute(fs, []string{"UUID", "-nonesuch", "x"})); err == nil {
+	got, err := permute(fs, []string{"UUID", "-nonesuch", "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Parse(got); err == nil {
 		t.Fatal("an unknown flag was accepted")
 	}
 }
@@ -123,12 +139,15 @@ func TestUnknownFlagIsStillAnError(t *testing.T) {
 // Rearranging arguments must not lose any.
 func TestPermuteKeepsEveryArgument(t *testing.T) {
 	for _, args := range [][]string{
-		{}, {"UUID"}, {"-force"}, {"-server"}, // trailing flag with no value
+		{}, {"UUID"}, {"-force"},
 		{"a", "-folder", "F", "b", "-deleted", "c"},
 		{"-", "x"}, // a bare "-" is not a flag
 	} {
 		fs := flagsLike()
-		got := permute(fs, args)
+		got, err := permute(fs, args)
+		if err != nil {
+			t.Fatalf("permute(%v): %v", args, err)
+		}
 		count := map[string]int{}
 		for _, a := range args {
 			count[a]++
@@ -142,6 +161,27 @@ func TestPermuteKeepsEveryArgument(t *testing.T) {
 			if n != 0 {
 				t.Errorf("permute(%v) = %v: %q changed count by %d", args, got, a, -n)
 			}
+		}
+	}
+}
+
+// A value-taking flag with nothing after it has to be reported as exactly that.
+// Moving it to the front would stand it next to the "--" separator, which it
+// would then take as its value -- so "notes rm UUID -server" would try to reach
+// a daemon called "--" instead of saying the flag is incomplete.
+func TestTrailingValueFlagIsReported(t *testing.T) {
+	for _, args := range [][]string{
+		{"UUID", "-server"},
+		{"-token", "t", "UUID", "-folder"},
+	} {
+		fs := flagsLike()
+		got, err := permute(fs, args)
+		if err == nil {
+			t.Errorf("permute(%v) = %v, want an error", args, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "needs an argument") {
+			t.Errorf("permute(%v) error = %v, want it to name the problem", args, err)
 		}
 	}
 }

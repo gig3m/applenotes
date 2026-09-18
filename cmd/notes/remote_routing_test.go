@@ -55,8 +55,10 @@ func TestServerFlagNeverFallsBackToTheLocalDatabase(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got = nil
-			args := append([]string{}, tc.args...)
-			args = append(args, "-server", srv.URL, "-token", "t", "-db", noDB)
+			// Flags first: for the free-text commands (capture, search) a flag
+			// written after the text is part of the text, by design.
+			args := []string{tc.args[0], "-server", srv.URL, "-token", "t", "-db", noDB}
+			args = append(args, tc.args[1:]...)
 			var out, errb bytes.Buffer
 			code := run(args, strings.NewReader(tc.stdin), &out, &errb)
 

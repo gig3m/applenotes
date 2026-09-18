@@ -64,7 +64,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	server := fs.String("server", os.Getenv("NOTESD_URL"), "notesd URL; reads and writes go over HTTP instead of the local database")
 	token := fs.String("token", "", "bearer token for -server (default: $NOTESD_TOKEN, or ~/.config/applenotes/token)")
 	force := fs.Bool("force", false, "replace: overwrite even if it discards attachments or checklists")
-	if err := fs.Parse(permute(fs, args[1:])); err != nil {
+	rest := args[1:]
+	if permutable[cmd] {
+		var err error
+		if rest, err = permute(fs, rest); err != nil {
+			fmt.Fprintf(stderr, "notes: %v\n\n", err)
+			fmt.Fprint(stderr, usageText)
+			return 2
+		}
+	}
+	if err := fs.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -185,6 +194,10 @@ The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
 		if fs.NArg() == 0 {
 			return usageErr("search needs something to look for")
 		}
+		// search does not permute, so a flag written after the query is part of
+		// the query and will simply match nothing. Say so: silently searching
+		// for "-folder Work" looks like the folder is empty.
+		warnFlagInText(stderr, "search", fs)
 		err = search(stdout, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "), *deleted)
 	case "bar":
 		if fs.NArg() > 0 {
@@ -476,7 +489,47 @@ func decode(r io.Reader, stdout io.Writer) error {
 // positional and quietly does nothing -- the command then goes looking for a
 // local database on a machine that has none. Everything after a bare "--" is
 // left alone, which is how a note whose text begins with "-" gets written.
-func permute(fs *flag.FlagSet, args []string) []string {
+// permutable lists the commands whose positional arguments are UUIDs, which
+// can never look like a flag. Everything else keeps the stdlib rule that
+// parsing stops at the first positional.
+//
+// This is an allow-list rather than a deny-list because the cost of being wrong
+// is not symmetric. capture and search take free text, and reordering that text
+// does not merely confuse the parse -- "notes capture fix the -server timeout"
+// loses two words and sends the note to a daemon named "timeout". A command
+// added later is better off with the surprising-but-harmless stdlib behaviour
+// than with its arguments silently rewritten.
+var permutable = map[string]bool{
+	"show": true, "append": true, "replace": true, "rm": true, "edit": true,
+	"list": true, "folders": true, "new": true, "bar": true,
+}
+
+// warnFlagInText reports a positional that names a real flag. For a free-text
+// command that is not an error -- the text is the text -- but it is almost
+// never what the user meant, and the result (no matches, or a note with a stray
+// flag in it) gives no hint about why.
+func warnFlagInText(stderr io.Writer, cmd string, fs *flag.FlagSet) {
+	for _, a := range fs.Args() {
+		name := strings.TrimLeft(a, "-")
+		if name == a || name == "" {
+			continue
+		}
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if fs.Lookup(name) == nil {
+			continue
+		}
+		fmt.Fprintf(stderr,
+			"notes: %q here is part of the text, not a flag, because %s takes\n"+
+				"       everything after the first word as its argument.\n"+
+				"       Write flags first: notes %s %s …\n",
+			a, cmd, cmd, a)
+		return
+	}
+}
+
+func permute(fs *flag.FlagSet, args []string) ([]string, error) {
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -500,16 +553,20 @@ func permute(fs *flag.FlagSet, args []string) []string {
 		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
 			continue // -force takes no value; the next word is positional
 		}
-		if i+1 < len(args) {
-			i++
-			flags = append(flags, args[i])
+		if i+1 >= len(args) {
+			// A value-taking flag with nothing after it. Reported here rather
+			// than left to Parse: moving it to the front would put the "--"
+			// separator next to it, and it would swallow that as its value.
+			return nil, fmt.Errorf("flag needs an argument: %s", a)
 		}
+		i++
+		flags = append(flags, args[i])
 	}
 	// The "--" is re-emitted rather than dropped: without it Parse would read
 	// the moved positionals as flags again, and a note whose text starts with a
 	// dash would fail instead of being written.
 	if len(positional) == 0 {
-		return flags
+		return flags, nil
 	}
-	return append(append(flags, "--"), positional...)
+	return append(append(flags, "--"), positional...), nil
 }
