@@ -87,7 +87,8 @@ The read path is complete and validated against a real library.
 - [ ] LaunchAgent and installer
 - [ ] installer / TCC grants
 - [x] Linux client (`notes -server`)
-- [ ] TUI and Omarchy bar client
+- [x] `edit` in $EDITOR, and `capture` for one-line entry
+- [ ] Omarchy bar client
 
 ## Usage
 
@@ -99,8 +100,17 @@ notes new [-folder NAME]               create a note from Markdown on stdin
 notes append <uuid>                    append Markdown from stdin to a note
 notes replace <uuid>                   overwrite a note with Markdown from stdin
 notes rm <uuid>                        move a note to Recently Deleted
+notes edit [-force] <uuid>             open a note in $EDITOR, write it back
+notes capture [text…]                  make a note from one line, or from stdin
 notes decode                           decode a raw ZICNOTEDATA blob on stdin
 ```
+
+`edit` deliberately has no built-in editor: editing prose is solved, and you
+already have an answer to it. What it does instead is be careful about writing
+back. It refuses if the fetch failed, if the editor exited non-zero, or if you
+emptied the buffer; it writes nothing when you changed nothing, since a rewrite
+costs formatting for no gain; and if the write is refused it keeps your edit in
+the temp file and tells you where.
 
 ### Writing
 

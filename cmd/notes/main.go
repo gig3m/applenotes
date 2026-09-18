@@ -64,8 +64,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
-	if *force && cmd != "replace" {
-		return usageErr("-force only applies to replace")
+	if *force && cmd != "replace" && cmd != "edit" {
+		return usageErr("-force only applies to replace and edit")
 	}
 
 	var err error
@@ -117,6 +117,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 			return usageErr("rm needs exactly one note UUID")
 		}
 		err = rmNote(stderr, *dbPath, fs.Arg(0))
+	case "edit":
+		if fs.NArg() != 1 {
+			return usageErr("edit needs exactly one note UUID")
+		}
+		err = editNote(stderr, *dbPath, *server, *token, fs.Arg(0), *force)
+	case "capture":
+		err = captureNote(stdin, stdout, stderr, *dbPath, *server, *token, *folder, strings.Join(fs.Args(), " "))
 	case "decode":
 		if fs.NArg() > 0 {
 			return usageErr("decode reads from stdin and takes no arguments")
@@ -144,6 +151,8 @@ commands:
   new [-folder NAME]               create a note from Markdown on stdin
   append <uuid>                    append Markdown from stdin to a note
   replace [-force] <uuid>          overwrite a note with Markdown from stdin
+  edit [-force] <uuid>             open a note in $EDITOR and write it back
+  capture [text…]                  make a note from one line, or from stdin
   rm <uuid>                        move a note to Recently Deleted
   decode                           decode a raw ZICNOTEDATA blob on stdin
 
