@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Search over note bodies, not just titles. Apple Notes' primary verb is
@@ -71,7 +72,12 @@ func (s *Store) Search(opt SearchOptions) ([]Hit, error) {
 			continue
 		}
 		text := body.PlainText()
-		idx := strings.Index(strings.ToLower(text), needle)
+		// Lowered once and kept: the match offset is found in this string, so
+		// every later use of it has to be against this string too. Measuring in
+		// one and slicing the other is the bug that made search panic, because
+		// strings.ToLower preserves rune count but not byte length.
+		lowered := strings.ToLower(text)
+		idx := strings.Index(lowered, needle)
 		titleIdx := strings.Index(strings.ToLower(n.Title), needle)
 		if idx < 0 && titleIdx < 0 {
 			continue
@@ -83,13 +89,16 @@ func (s *Store) Search(opt SearchOptions) ([]Hit, error) {
 			// A phrase that is the note's name is almost always the note
 			// wanted, so it outranks a body match.
 			h.Score = titleScore(n.Title, needle)
-			h.Context = excerpt(text, idx, needle)
+			h.Context = excerpt(text, runeOffset(lowered, idx), needle)
 			if idx < 0 {
 				h.Context = n.Title
 			}
 		default:
-			h.Score = 100 + strings.Count(strings.ToLower(text), needle)
-			h.Context = excerpt(text, idx, needle)
+			// The count is capped so that a long note mentioning the phrase
+			// many times cannot climb past the title band: "titles rank above
+			// bodies" has to hold for every note, not just short ones.
+			h.Score = 100 + min(strings.Count(lowered, needle), 99)
+			h.Context = excerpt(text, runeOffset(lowered, idx), needle)
 		}
 		hits = append(hits, h)
 	}
@@ -115,33 +124,40 @@ func titleScore(title, needle string) int {
 	return 1000
 }
 
+// runeOffset converts a byte offset into the string it was found in to a rune
+// offset, which is what excerpt indexes by. Taking a byte offset from one
+// string and applying it to another is only safe in ASCII.
+func runeOffset(s string, byteIdx int) int {
+	if byteIdx < 0 {
+		return -1
+	}
+	return utf8.RuneCountInString(s[:byteIdx])
+}
+
 // excerpt returns the match with a little text either side, on one line and cut
-// at word boundaries so it reads as a phrase rather than a fragment.
-func excerpt(text string, idx int, needle string) string {
-	if idx < 0 {
+// at word boundaries so it reads as a phrase rather than a fragment. start is a
+// rune offset into text.
+func excerpt(text string, start int, needle string) string {
+	if start < 0 {
 		return ""
 	}
 	r := []rune(text)
-	start := idx
-	// idx is a byte offset; convert by counting runes up to it.
-	start = len([]rune(text[:idx]))
-	end := start + len([]rune(needle))
+	if start > len(r) {
+		return ""
+	}
+	end := min(start+len([]rune(needle)), len(r))
 
 	lo := start - contextRadius
 	if lo < 0 {
 		lo = 0
 	} else {
-		for lo < start && !unicode.IsSpace(r[lo]) {
-			lo++
-		}
+		lo = trimToWord(r, lo, start, +1)
 	}
 	hi := end + contextRadius
 	if hi > len(r) {
 		hi = len(r)
 	} else {
-		for hi > end && !unicode.IsSpace(r[hi-1]) {
-			hi--
-		}
+		hi = trimToWord(r, hi, end, -1)
 	}
 
 	out := strings.Join(strings.Fields(string(r[lo:hi])), " ")
@@ -152,4 +168,33 @@ func excerpt(text string, idx int, needle string) string {
 		out += "…"
 	}
 	return out
+}
+
+// trimToWord moves an excerpt edge onto a word boundary, walking from edge
+// towards limit. Scripts that do not put spaces between words -- Japanese and
+// Chinese among them -- have no boundary to find, and walking the whole way
+// would leave the match with no context at all, which is the one thing the
+// excerpt exists to provide. So the walk gives up halfway and keeps the raw
+// edge: a phrase cut mid-word still tells the user which note this is.
+func trimToWord(r []rune, edge, limit, dir int) int {
+	give := (limit - edge) * dir
+	if give < 0 {
+		give = -give
+	}
+	give /= 2
+	moved := 0
+	for i := edge; i != limit && moved < give; i += dir {
+		at := i
+		if dir < 0 {
+			at = i - 1
+		}
+		if unicode.IsSpace(r[at]) {
+			return i
+		}
+		moved++
+	}
+	if moved >= give {
+		return edge // no boundary within reach; an uncut edge beats no context
+	}
+	return limit
 }

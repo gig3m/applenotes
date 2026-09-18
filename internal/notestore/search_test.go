@@ -1,6 +1,9 @@
 package notestore
 
 import (
+	"database/sql"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -99,5 +102,125 @@ func TestSearchSkipsUnreadableNotes(t *testing.T) {
 func TestSearchRejectsAnEmptyQuery(t *testing.T) {
 	if _, err := openTest(t).Search(SearchOptions{Query: "  "}); err == nil {
 		t.Error("an empty query was accepted")
+	}
+}
+
+// strings.ToLower preserves rune count but not byte length: Ⱥ (U+023A, 2 bytes)
+// lowercases to ⱥ (U+2C65, 3 bytes) and İ (U+0130, 2 bytes) to i (1 byte). The
+// match offset is found in the lowercased text, so using it on the original
+// slices at the wrong place -- too far right it panics and takes down the whole
+// search, too far left it silently returns an excerpt that does not contain the
+// match. Apple Notes bodies are arbitrary UTF-8, so this is reachable by anyone
+// who pastes a phonetic symbol or writes "İstanbul".
+func TestSearchSurvivesTextWhoseLowercaseIsADifferentLength(t *testing.T) {
+	for _, tc := range []struct{ name, filler string }{
+		{"lowercase is wider", "Ⱥ"},    // 2 bytes -> 3: offset runs past the end
+		{"lowercase is narrower", "İ"}, // 2 bytes -> 1: offset falls short
+		{"kelvin sign", "K"},           // 3 bytes -> 1
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Repeat(tc.filler+" ", 120) + " the target phrase is here"
+			s := searchFixture(t, "Padded", body)
+
+			hits, err := s.Search(SearchOptions{Query: "target"})
+			if err != nil {
+				t.Fatalf("search failed: %v", err)
+			}
+			if len(hits) == 0 {
+				t.Fatal("no hit for a phrase that is in the body")
+			}
+			// The excerpt exists to show where the match is; one that does not
+			// contain it is worse than none, because it reads as if it does.
+			if !strings.Contains(strings.ToLower(hits[0].Context), "target") {
+				t.Errorf("context does not contain the match: %q", hits[0].Context)
+			}
+		})
+	}
+}
+
+// A body in a script that does not separate words with spaces still has to come
+// back with something around the match: trimming to word boundaries must not
+// consume the entire excerpt.
+func TestSearchGivesContextInAScriptWithoutSpaces(t *testing.T) {
+	body := strings.Repeat("日本語のテキスト", 20) + "target" + strings.Repeat("続きの文章です", 20)
+	s := searchFixture(t, "Japanese", body)
+
+	hits, err := s.Search(SearchOptions{Query: "target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no hit")
+	}
+	// Just the needle and two ellipses is what the boundary walk degenerates to.
+	if got := strings.Trim(hits[0].Context, "…"); got == "target" {
+		t.Errorf("no surrounding text at all: %q", hits[0].Context)
+	}
+	if !strings.Contains(hits[0].Context, "target") {
+		t.Errorf("context does not contain the match: %q", hits[0].Context)
+	}
+}
+
+// searchFixture builds a store holding exactly one note with the given title
+// and body, for cases where the shared fixture's ASCII content is the reason a
+// bug stays invisible.
+func searchFixture(t *testing.T, title, body string) *Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "NoteStore.sqlite")
+	dsn := (&url.URL{Scheme: "file", Path: path,
+		RawQuery: url.Values{"_pragma": {"journal_mode(WAL)"}}.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `CREATE TABLE ZICCLOUDSYNCINGOBJECT (
+		Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER TEXT, ZTITLE1 TEXT, ZTITLE2 TEXT,
+		ZSNIPPET TEXT, ZFOLDER INTEGER, ZNOTEDATA INTEGER,
+		ZCREATIONDATE1 REAL, ZCREATIONDATE REAL, ZCREATIONDATE2 REAL,
+		ZMODIFICATIONDATE1 REAL, ZMODIFICATIONDATE REAL,
+		ZMARKEDFORDELETION INTEGER, ZISPINNED INTEGER, ZISPASSWORDPROTECTED INTEGER)`)
+	mustExec(t, db, `CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY, ZNOTE INTEGER, ZDATA BLOB)`)
+	mustExec(t, db, `INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZIDENTIFIER, ZTITLE2) VALUES (1, 'DefaultFolder-CloudKit', 'Notes')`)
+	if _, err := db.Exec(`INSERT INTO ZICCLOUDSYNCINGOBJECT
+		(Z_PK, ZIDENTIFIER, ZTITLE1, ZFOLDER, ZNOTEDATA, ZCREATIONDATE1, ZMODIFICATIONDATE1)
+		VALUES (100, 'UUID-A', ?, 1, 200, 100000, 500000)`, title); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO ZICNOTEDATA (Z_PK, ZNOTE, ZDATA) VALUES (200, 100, ?)`,
+		blob(title+"\n"+body, run(len([]rune(title+"\n"+body)), 0, -2, ""))); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// "Titles rank above bodies" has to hold for every note, not just short ones.
+// The body score grew with the number of occurrences and nothing bounded it, so
+// a long transcript mentioning a common word enough times outranked the note
+// actually named after it -- the exact inversion the ranking exists to prevent.
+func TestALongBodyCannotOutrankATitle(t *testing.T) {
+	titled := searchFixture(t, "The Plan", "nothing else here")
+	titledHits, err := titled.Search(SearchOptions{Query: "plan"})
+	if err != nil || len(titledHits) == 0 {
+		t.Fatalf("no hit for the titled note: %v", err)
+	}
+
+	// A note that says the word a thousand times and is not about it.
+	const transcript = "we should plan for that. "
+	wordy := searchFixture(t, "Transcript", strings.Repeat(transcript, 1000))
+	wordyHits, err := wordy.Search(SearchOptions{Query: "plan"})
+	if err != nil || len(wordyHits) == 0 {
+		t.Fatalf("no hit for the wordy note: %v", err)
+	}
+
+	if wordyHits[0].Score >= titledHits[0].Score {
+		t.Errorf("a body with 1000 matches scored %d, at or above the title match's %d",
+			wordyHits[0].Score, titledHits[0].Score)
 	}
 }
