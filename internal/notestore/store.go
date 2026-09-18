@@ -147,7 +147,11 @@ type ListOptions struct {
 // A row is a note when a body row points back at it. Testing ZNOTEDATA IS NOT
 // NULL only checks the foreign key, so a note whose body has not arrived yet --
 // the shape CloudKit produces mid-sync -- would list but fail to open. Title is
-// not required either: a note whose first line is empty can have none.
+// not required either: a note whose first line is empty can have none. A
+// readable body is not required of a locked note: it has a data row with no
+// data, and it is still a note that should be listed and addressable. A row
+// with neither -- no readable body and not locked -- is a placeholder, not a
+// note; a real library has several.
 const noteSelect = `
 	SELECT n.Z_PK,
 	       COALESCE(n.ZIDENTIFIER, ''),
@@ -164,7 +168,8 @@ const noteSelect = `
 	       COALESCE(f.ZMARKEDFORDELETION, 0)
 	FROM ZICCLOUDSYNCINGOBJECT n
 	LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON f.Z_PK = n.ZFOLDER
-	WHERE EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)`
+	WHERE (EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
+	       OR COALESCE(n.ZISPASSWORDPROTECTED, 0) <> 0)`
 
 // Notes lists note metadata, newest first.
 func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
@@ -197,6 +202,12 @@ func (s *Store) Notes(opt ListOptions) ([]NoteMeta, error) {
 // ErrNotFound is returned when no note matches.
 var ErrNotFound = errors.New("notestore: note not found")
 
+// ErrUnreadableBody reports a note that exists but whose contents cannot be
+// read -- password-protected, or not yet synced. It is deliberately distinct
+// from ErrNotFound: a caller deciding whether to refuse a write, or what status
+// code to return, needs to tell "no such note" from "cannot see inside it".
+var ErrUnreadableBody = errors.New("notestore: note body cannot be read")
+
 // Meta looks a note up by its ZIDENTIFIER UUID.
 func (s *Store) Meta(uuid string) (NoteMeta, error) {
 	rows, err := s.db.Query(noteSelect+` AND n.ZIDENTIFIER = ? ORDER BY n.Z_PK LIMIT 1`, uuid)
@@ -219,14 +230,20 @@ func (s *Store) Body(uuid string) (*Note, error) {
 	var blob []byte
 	// Ordered to match Meta, so a duplicated UUID cannot make show print one
 	// row's body under another row's metadata.
+	// Ordered by the same key as ScriptID, so the row whose body is inspected is
+	// the row that will be written. Selecting differently here would let the
+	// guard clear one note and the write land on another.
 	err := s.db.QueryRow(`
 		SELECT d.ZDATA
 		FROM ZICCLOUDSYNCINGOBJECT n
 		JOIN ZICNOTEDATA d ON d.ZNOTE = n.Z_PK
-		WHERE n.ZIDENTIFIER = ? AND d.ZDATA IS NOT NULL
+		WHERE n.ZIDENTIFIER = ?
 		ORDER BY n.Z_PK LIMIT 1`, uuid).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
+	}
+	if len(blob) == 0 {
+		return nil, ErrUnreadableBody
 	}
 	if err != nil {
 		return nil, err
@@ -313,7 +330,8 @@ func (s *Store) ScriptID(uuid string) (string, error) {
 	err = s.db.QueryRow(`
 		SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT n
 		WHERE n.ZIDENTIFIER = ?
-		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK)
+		  AND (EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
+		       OR COALESCE(n.ZISPASSWORDPROTECTED, 0) <> 0)
 		ORDER BY Z_PK LIMIT 1`, uuid).Scan(&pk)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
@@ -332,7 +350,8 @@ func (s *Store) Exists(uuid string) (bool, error) {
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM ZICCLOUDSYNCINGOBJECT n
 		WHERE n.ZIDENTIFIER = ?
-		  AND EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK)`, uuid).Scan(&n)
+		  AND (EXISTS (SELECT 1 FROM ZICNOTEDATA d WHERE d.ZNOTE = n.Z_PK AND d.ZDATA IS NOT NULL)
+		       OR COALESCE(n.ZISPASSWORDPROTECTED, 0) <> 0)`, uuid).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("notestore: %w", err)
 	}

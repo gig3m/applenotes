@@ -68,8 +68,13 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 
+	if err != nil && ctx.Err() == context.Canceled {
+		// The caller went away. The event is already with Notes.app and may
+		// still be applied, so this is not a statement that nothing happened.
+		return "", fmt.Errorf("applescript: cancelled; the change may still have been applied: %w", context.Canceled)
+	}
 	if err != nil && deadlineCtx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("applescript: timed out after %s; the change may still have been applied, since Notes.app has already received the event (a consent dialog may also be waiting on the Mac's screen)", Timeout)
+		return "", fmt.Errorf("applescript: timed out after %s; the change may still have been applied, since Notes.app has already received the event (a consent dialog may also be waiting on the Mac's screen): %w", Timeout, context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -81,7 +86,7 @@ func Run(ctx context.Context, src string, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("applescript: %s", msg)
+		return "", fmt.Errorf("applescript: %s: %w", msg, err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

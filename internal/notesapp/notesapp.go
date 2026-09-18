@@ -33,20 +33,6 @@ import (
 // portable note UUIDs into the machine-local ids AppleScript addresses.
 type Writer struct {
 	store *notestore.Store
-
-	// OnDegrade, if set, is called before a write that will flatten formatting,
-	// with the names of what will be lost. No text is removed, though an
-	// indented paragraph gains non-breaking spaces where its indent was.
-	//
-	// It is a plain field, so a caller sharing one Writer across goroutines
-	// must set it before any write and not change it afterwards.
-	OnDegrade func(features []string)
-}
-
-func (w *Writer) warn(features []string) {
-	if w.OnDegrade != nil && len(features) > 0 {
-		w.OnDegrade(features)
-	}
 }
 
 func New(s *notestore.Store) *Writer { return &Writer{store: s} }
@@ -114,20 +100,22 @@ func (e *ErrLossyRewrite) Error() string {
 // database, so an edit still buffered in Notes.app is not included -- and is
 // overwritten. And Markdown metacharacters in the existing prose are re-escaped
 // on the way through.
-func (w *Writer) Append(ctx context.Context, uuid, markdown string) error {
+// Append returns the formatting the rewrite flattened. It is a return value
+// rather than a callback on the Writer so that a server handling concurrent
+// requests cannot report one request's loss in another's response.
+func (w *Writer) Append(ctx context.Context, uuid, markdown string) (degraded []string, err error) {
 	body, err := w.store.Body(uuid)
 	if err != nil {
-		return err
+		return nil, w.explain(uuid, err)
 	}
 	if lost := body.Destroys(); len(lost) > 0 {
-		return &ErrLossyRewrite{Features: lost}
+		return nil, &ErrLossyRewrite{Features: lost}
 	}
-	w.warn(body.Degrades())
 	existing := body.Markdown()
 	if existing != "" {
 		existing += "\n"
 	}
-	return w.ReplaceForce(ctx, uuid, existing+markdown)
+	return body.Degrades(), w.ReplaceForce(ctx, uuid, existing+markdown)
 }
 
 const replaceScript = `on run argv
@@ -145,31 +133,36 @@ end run`
 // that would silently discard attachments and checklists. Formatting that
 // merely flattens is not grounds for refusing; Note.Degrades reports that
 // separately. ReplaceForce skips the check for a caller that means it.
-func (w *Writer) Replace(ctx context.Context, uuid, markdown string) error {
+func (w *Writer) Replace(ctx context.Context, uuid, markdown string) (degraded []string, err error) {
 	// Fails closed. A body that cannot be read is a locked or corrupt note --
 	// exactly the case where least is known and most could be lost -- so an
 	// unreadable note is refused rather than silently overwritten.
 	body, err := w.store.Body(uuid)
-	if errors.Is(err, notestore.ErrNotFound) {
-		// Either no such note, or one whose body cannot be read -- a locked
-		// note, say. Both refuse, but they are different situations. Store.Meta
-		// cannot tell them apart, because it requires a readable body for the
-		// same reason Body does; Store.Exists does not.
-		if ok, existsErr := w.store.Exists(uuid); existsErr != nil {
-			return existsErr
-		} else if !ok {
-			return err
-		}
-		return fmt.Errorf("this note's body cannot be read, so what a rewrite would destroy cannot be checked; pass force to overwrite it anyway: %w", err)
-	}
 	if err != nil {
-		return fmt.Errorf("cannot check what this rewrite would destroy: %w", err)
+		return nil, w.explain(uuid, err)
 	}
 	if lost := body.Destroys(); len(lost) > 0 {
-		return &ErrLossyRewrite{Features: lost}
+		return nil, &ErrLossyRewrite{Features: lost}
 	}
-	w.warn(body.Degrades())
-	return w.ReplaceForce(ctx, uuid, markdown)
+	return body.Degrades(), w.ReplaceForce(ctx, uuid, markdown)
+}
+
+// explain turns a failed body read into an error a caller can act on. A missing
+// note and an unreadable one are both refusals, but they are different
+// situations and only one of them has -force as a way through.
+func (w *Writer) explain(uuid string, err error) error {
+	if !errors.Is(err, notestore.ErrNotFound) && !errors.Is(err, notestore.ErrUnreadableBody) {
+		return fmt.Errorf("cannot check what this rewrite would destroy: %w", err)
+	}
+	ok, existsErr := w.store.Exists(uuid)
+	if existsErr != nil {
+		return existsErr
+	}
+	if !ok {
+		return err // genuinely no such note
+	}
+	return fmt.Errorf("%w: what a rewrite would destroy cannot be checked; use force to overwrite it anyway (%v)",
+		notestore.ErrUnreadableBody, err)
 }
 
 // ReplaceForce overwrites a note's body without checking what that discards.

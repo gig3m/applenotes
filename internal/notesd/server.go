@@ -206,8 +206,7 @@ func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writer, degraded := s.writer()
-	uuid, err := writer.Create(r.Context(), req.Folder, req.Markdown)
+	uuid, err := notesapp.New(s.store).Create(r.Context(), req.Folder, req.Markdown)
 	if errors.Is(err, notesapp.ErrNotYetVisible) {
 		// The note exists; Notes.app has not written it to the database yet, so
 		// its portable id is not knowable. Saying so beats inventing one.
@@ -221,9 +220,7 @@ func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
 		writeWriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"accepted": true, "uuid": uuid, "degraded": *degraded,
-	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "uuid": uuid})
 }
 
 func (s *Server) replaceNote(w http.ResponseWriter, r *http.Request) {
@@ -231,12 +228,12 @@ func (s *Server) replaceNote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writer, degraded := s.writer()
+	var degraded []string
 	var err error
 	if req.Force {
-		err = writer.ReplaceForce(r.Context(), r.PathValue("uuid"), req.Markdown)
+		err = notesapp.New(s.store).ReplaceForce(r.Context(), r.PathValue("uuid"), req.Markdown)
 	} else {
-		err = writer.Replace(r.Context(), r.PathValue("uuid"), req.Markdown)
+		degraded, err = notesapp.New(s.store).Replace(r.Context(), r.PathValue("uuid"), req.Markdown)
 	}
 	s.acknowledge(w, err, degraded)
 }
@@ -246,29 +243,19 @@ func (s *Server) appendNote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writer, degraded := s.writer()
-	s.acknowledge(w, writer.Append(r.Context(), r.PathValue("uuid"), req.Markdown), degraded)
+	degraded, err := notesapp.New(s.store).Append(r.Context(), r.PathValue("uuid"), req.Markdown)
+	s.acknowledge(w, err, degraded)
 }
 
 func (s *Server) deleteNote(w http.ResponseWriter, r *http.Request) {
-	writer, degraded := s.writer()
 	// Deleting moves the note to Recently Deleted, where Notes keeps it for 30
 	// days, so it is not guarded the way a rewrite is.
-	s.acknowledge(w, writer.Delete(r.Context(), r.PathValue("uuid")), degraded)
+	s.acknowledge(w, notesapp.New(s.store).Delete(r.Context(), r.PathValue("uuid")), nil)
 }
 
 // --- plumbing ---------------------------------------------------------------
 
-// writer builds a Writer per request. OnDegrade is a field on the Writer, so a
-// shared one would report one request's degradation to another.
-func (s *Server) writer() (*notesapp.Writer, *[]string) {
-	degraded := new([]string)
-	w := notesapp.New(s.store)
-	w.OnDegrade = func(features []string) { *degraded = features }
-	return w, degraded
-}
-
-func (s *Server) acknowledge(w http.ResponseWriter, err error, degraded *[]string) {
+func (s *Server) acknowledge(w http.ResponseWriter, err error, degraded []string) {
 	if err != nil {
 		writeWriteError(w, err)
 		return
@@ -276,7 +263,7 @@ func (s *Server) acknowledge(w http.ResponseWriter, err error, degraded *[]strin
 	// Accepted, not OK: Notes.app persists on its own schedule, so claiming the
 	// change is durable would be a lie.
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"accepted": true, "degraded": *degraded,
+		"accepted": true, "degraded": degraded,
 	})
 }
 

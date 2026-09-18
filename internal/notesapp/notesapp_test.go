@@ -20,7 +20,7 @@ import (
 
 func TestReplaceRefusesToDestroyContent(t *testing.T) {
 	w := New(openFixture(t))
-	err := w.Replace(context.Background(), "UUID-ATTACH", "new body")
+	_, err := w.Replace(context.Background(), "UUID-ATTACH", "new body")
 
 	var lossy *ErrLossyRewrite
 	if !errors.As(err, &lossy) {
@@ -34,7 +34,7 @@ func TestReplaceRefusesToDestroyContent(t *testing.T) {
 func TestAppendRefusesToDestroyContent(t *testing.T) {
 	w := New(openFixture(t))
 	var lossy *ErrLossyRewrite
-	if err := w.Append(context.Background(), "UUID-ATTACH", "more"); !errors.As(err, &lossy) {
+	if _, err := w.Append(context.Background(), "UUID-ATTACH", "more"); !errors.As(err, &lossy) {
 		t.Fatalf("got %v, want ErrLossyRewrite", err)
 	}
 }
@@ -47,7 +47,7 @@ func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 	// previous version refused permanently, with no way to override it.
 	for _, uuid := range []string{"UUID-PLAIN", "UUID-DEGRADED"} {
 		var lossy *ErrLossyRewrite
-		if err := w.Replace(context.Background(), uuid, "new body"); errors.As(err, &lossy) {
+		if _, err := w.Replace(context.Background(), uuid, "new body"); errors.As(err, &lossy) {
 			t.Errorf("%s was refused: %v", uuid, err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestReplaceAllowsMerelyDegradedNotes(t *testing.T) {
 // is known, so the guard must fail closed rather than overwrite it.
 func TestReplaceFailsClosedOnUnreadableBody(t *testing.T) {
 	w := New(openFixture(t))
-	err := w.Replace(context.Background(), "UUID-MISSING", "new body")
+	_, err := w.Replace(context.Background(), "UUID-MISSING", "new body")
 	if err == nil {
 		t.Fatal("an unreadable note was overwritten")
 	}
@@ -66,49 +66,45 @@ func TestReplaceFailsClosedOnUnreadableBody(t *testing.T) {
 	}
 }
 
-// Formatting that will flatten must be reported, on both writing paths.
-func TestOnDegradeIsCalled(t *testing.T) {
+// Formatting that will flatten is reported on both writing paths. It is a
+// return value, not a field on the Writer, so that concurrent callers cannot
+// see each other's.
+func TestDegradedFormattingIsReturned(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		call func(*Writer) error
+		call func(*Writer, string) ([]string, error)
 	}{
-		{"replace", func(w *Writer) error {
-			return w.Replace(context.Background(), "UUID-DEGRADED", "new")
+		{"replace", func(w *Writer, u string) ([]string, error) {
+			return w.Replace(context.Background(), u, "new")
 		}},
-		{"append", func(w *Writer) error {
-			return w.Append(context.Background(), "UUID-DEGRADED", "more")
+		{"append", func(w *Writer, u string) ([]string, error) {
+			return w.Append(context.Background(), u, "more")
 		}},
 	} {
 		w := New(openFixture(t))
-		var got []string
-		w.OnDegrade = func(f []string) { got = f }
-		_ = tc.call(w) // the Apple Event fails here; the callback fires first
+		// The Apple Event fails here -- osascript does not exist -- but the
+		// features are computed before it and returned alongside the error.
+		got, _ := tc.call(w, "UUID-DEGRADED")
 		if len(got) == 0 {
 			t.Errorf("%s: nothing reported for a note that will flatten", tc.name)
 		}
-	}
-}
-
-// A note that flattens nothing must not produce a warning.
-func TestOnDegradeSilentForPlainNotes(t *testing.T) {
-	w := New(openFixture(t))
-	called := false
-	w.OnDegrade = func([]string) { called = true }
-	_ = w.Replace(context.Background(), "UUID-PLAIN", "new")
-	if called {
-		t.Error("warned about a plain note")
+		if plain, _ := tc.call(w, "UUID-PLAIN"); len(plain) != 0 {
+			t.Errorf("%s: reported %v for a plain note", tc.name, plain)
+		}
 	}
 }
 
 // A locked note and a typo both fail, but they are different situations.
 func TestLockedNoteIsDistinguishedFromMissing(t *testing.T) {
 	w := New(openFixture(t))
-	locked := w.Replace(context.Background(), "UUID-LOCKED", "new")
-	if locked == nil || !strings.Contains(locked.Error(), "cannot be read") {
-		t.Errorf("locked note: got %v, want a message about an unreadable body", locked)
+	_, locked := w.Replace(context.Background(), "UUID-LOCKED", "new")
+	// Distinguishable programmatically, not just in prose: a daemon choosing a
+	// status code cannot be made to string-match.
+	if !errors.Is(locked, notestore.ErrUnreadableBody) {
+		t.Errorf("locked note: got %v, want ErrUnreadableBody", locked)
 	}
-	missing := w.Replace(context.Background(), "UUID-NOSUCH", "new")
-	if missing == nil || strings.Contains(missing.Error(), "cannot be read") {
+	_, missing := w.Replace(context.Background(), "UUID-NOSUCH", "new")
+	if !errors.Is(missing, notestore.ErrNotFound) || errors.Is(missing, notestore.ErrUnreadableBody) {
 		t.Errorf("missing note: got %v, want a plain not-found", missing)
 	}
 }

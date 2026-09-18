@@ -10,7 +10,13 @@ import (
 	"unicode/utf16"
 )
 
-var errWireType = errors.New("unexpected wire type")
+var (
+	errWireType = errors.New("unexpected wire type")
+	// errMalformed marks a blob whose structure is not what the schema says.
+	// Returning an empty note instead would be indistinguishable from an empty
+	// note, and a rewrite would then truncate the real one.
+	errMalformed = errors.New("malformed note")
+)
 
 // Policy on malformed fields: only AttributeRun.length is fatal, because
 // reading it as zero silently misaligns every run that follows. Every other
@@ -127,7 +133,7 @@ func decodeNoteStore(raw []byte) (*Note, error) {
 		return nil, err
 	}
 	if out == nil {
-		return &Note{}, nil
+		return nil, fmt.Errorf("notestore: %w: no document", errMalformed)
 	}
 	return out, nil
 }
@@ -148,7 +154,7 @@ func decodeDocument(b []byte) (*Note, error) {
 		return nil, err
 	}
 	if out == nil {
-		return &Note{}, nil
+		return nil, fmt.Errorf("notestore: %w: no note in document", errMalformed)
 	}
 	return out, nil
 }

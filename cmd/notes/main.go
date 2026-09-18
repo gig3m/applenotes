@@ -42,6 +42,10 @@ func main() {
 	// fs uses ExitOnError, so Parse never returns on failure.
 	fs.Parse(os.Args[2:])
 
+	if *force && cmd != "replace" {
+		fatalUsage("-force only applies to replace")
+	}
+
 	var err error
 	switch cmd {
 	case "list":
@@ -206,14 +210,7 @@ func writer(path string) (*notestore.Store, *notesapp.Writer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	w := notesapp.New(s)
-	w.OnDegrade = func(features []string) {
-		fmt.Fprintf(os.Stderr,
-			"notes: this rewrite will flatten %s.\n"+
-				"       No text is removed, though an indent becomes spaces in the text.\n",
-			strings.Join(features, ", "))
-	}
-	return s, w, nil
+	return s, notesapp.New(s), nil
 }
 
 func newNote(path, folder string) error {
@@ -245,6 +242,18 @@ func newNote(path, folder string) error {
 	return nil
 }
 
+// warnDegraded reports formatting the rewrite flattened. Nothing is removed,
+// but an indent becomes spaces in the text, so it is worth saying.
+func warnDegraded(features []string) {
+	if len(features) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"notes: this rewrite flattened %s.\n"+
+			"       No text is removed, though an indent becomes spaces in the text.\n",
+		strings.Join(features, ", "))
+}
+
 // warnLag explains why a write may not show up in list or show yet.
 func warnLag() {
 	fmt.Fprintln(os.Stderr,
@@ -266,7 +275,7 @@ func appendNote(path, uuid string) error {
 	}
 	defer s.Close()
 
-	err = w.Append(context.Background(), uuid, string(md))
+	degraded, err := w.Append(context.Background(), uuid, string(md))
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
 		return fmt.Errorf("%w.\n"+
@@ -276,6 +285,7 @@ func appendNote(path, uuid string) error {
 	if err != nil {
 		return err
 	}
+	warnDegraded(degraded)
 	warnLag()
 	return nil
 }
@@ -302,7 +312,7 @@ func replaceNote(path, uuid string, force bool) error {
 		return nil
 	}
 
-	err = w.Replace(context.Background(), uuid, string(md))
+	degraded, err := w.Replace(context.Background(), uuid, string(md))
 	var lossy *notesapp.ErrLossyRewrite
 	if errors.As(err, &lossy) {
 		return fmt.Errorf("%w.\n"+
@@ -312,6 +322,7 @@ func replaceNote(path, uuid string, force bool) error {
 	if err != nil {
 		return err
 	}
+	warnDegraded(degraded)
 	warnLag()
 	return nil
 }
