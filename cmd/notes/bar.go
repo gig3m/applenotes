@@ -64,8 +64,13 @@ func bar(stdout io.Writer, dbPath, server, token, folder string) error {
 		out.Alt = notes[0].UUID
 	}
 
-	enc := json.NewEncoder(stdout)
-	return enc.Encode(out)
+	return writeJSON(stdout, out)
+}
+
+// writeJSON emits one bar object. Shared so the no-server path upstream can
+// honour the same contract.
+func writeJSON(stdout io.Writer, out barOutput) error {
+	return json.NewEncoder(stdout).Encode(out)
 }
 
 // barNote is the little the bar needs, from either source.

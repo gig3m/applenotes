@@ -286,7 +286,10 @@ notes show <uuid>
 ```
 
 `-server` also reads the token from `~/.config/applenotes/token` if the
-environment is not set. Send it over Tailscale; there is no TLS, because the
+environment is not set. On a machine that cannot have a local notes database,
+running without either says so and tells you what to set, rather than failing on
+a macOS path that will never exist. An explicit `-db` is always honoured — a
+copied database is a fine thing to read anywhere. Send it over Tailscale; there is no TLS, because the
 tailnet is the encrypted channel and certificates on a loopback service would
 buy nothing.
 

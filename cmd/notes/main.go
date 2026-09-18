@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 
@@ -20,6 +21,16 @@ import (
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
+
+// needsNotes reports whether a command reads or writes the note library, as
+// opposed to working on its input.
+func needsNotes(cmd string) bool {
+	switch cmd {
+	case "decode", "help", "-h", "--help":
+		return false
+	}
+	return true
+}
 
 // run is main's body with its streams and exit code injected, so the dispatch
 // can be tested. The -force wiring in particular has regressed to a dead
@@ -56,6 +67,35 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+
+	// Looking for a local notes database on a machine that cannot have one is
+	// never right, and the resulting stat error tells the user nothing about
+	// what to do. Catch it before any command runs.
+	// An explicit -db is always honoured: a copied database is a legitimate
+	// thing to read on any machine.
+	if *server == "" && *dbPath == "" && runtime.GOOS != "darwin" && needsNotes(cmd) {
+		if cmd == "bar" {
+			// The bar's contract is one JSON object per run, whatever happened.
+			writeJSON(stdout, barOutput{
+				Text:    "notes ?",
+				Class:   "unreachable",
+				Tooltip: "no notesd URL: set NOTESD_URL to the daemon on your Mac",
+			})
+			return 0
+		}
+		fmt.Fprint(stderr, `notes: no notesd URL, and this machine has no local notes database.
+
+Point it at the daemon on your Mac, either way round:
+
+  export NOTESD_URL=http://<mac-tailnet-ip>:8437
+  notes `+cmd+`
+
+  notes `+cmd+` -server http://<mac-tailnet-ip>:8437
+
+The token is read from $NOTESD_TOKEN or ~/.config/applenotes/token.
+`)
 		return 2
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -257,5 +258,63 @@ func TestBarFailsFast(t *testing.T) {
 	}
 	if got["class"] != "unreachable" {
 		t.Errorf("class %v after a timeout, want unreachable", got["class"])
+	}
+}
+
+// On a machine that cannot have a notes database, falling back to the macOS
+// path produces a stat error that says nothing about what to do.
+func TestNoServerOnNonDarwinExplainsItself(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("this machine can have a local database")
+	}
+	t.Setenv("NOTESD_URL", "")
+	// bar is excluded on purpose: its contract is one JSON object per run, so
+	// it reports the same thing in its own shape. TestBarAlwaysEmitsOneValidJSONObject
+	// covers that.
+	for _, cmd := range []string{"list", "show", "capture"} {
+		var out, errb bytes.Buffer
+		code := run([]string{cmd}, strings.NewReader(""), &out, &errb)
+		if code != 2 {
+			t.Errorf("%s: exit %d, want 2", cmd, code)
+		}
+		for _, want := range []string{"NOTESD_URL", "-server", "no local notes database"} {
+			if !strings.Contains(errb.String(), want) {
+				t.Errorf("%s: message does not mention %q: %q", cmd, want, errb.String())
+			}
+		}
+		if strings.Contains(errb.String(), "NoteStore.sqlite") {
+			t.Errorf("%s: leaked the macOS path: %q", cmd, errb.String())
+		}
+	}
+}
+
+// bar says the same thing without breaking its contract.
+func TestBarWithNoServerStillEmitsJSON(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("this machine can have a local database")
+	}
+	t.Setenv("NOTESD_URL", "")
+	var out, errb bytes.Buffer
+	if code := run([]string{"bar"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Errorf("exit %d, want 0", code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %q", out.String())
+	}
+	if got["class"] != "unreachable" {
+		t.Errorf("class %v, want unreachable", got["class"])
+	}
+	if !strings.Contains(got["tooltip"].(string), "NOTESD_URL") {
+		t.Errorf("tooltip does not say what to set: %v", got["tooltip"])
+	}
+}
+
+// decode works on stdin and needs no library, so it must not be blocked.
+func TestDecodeNeedsNoServer(t *testing.T) {
+	t.Setenv("NOTESD_URL", "")
+	var out, errb bytes.Buffer
+	if code := run([]string{"decode"}, strings.NewReader("not gzip"), &out, &errb); code == 2 {
+		t.Errorf("decode was blocked: %q", errb.String())
 	}
 }
