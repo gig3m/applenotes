@@ -176,7 +176,7 @@ front, which also gives you TLS:
 then from the Linux side:
 
   export NOTESD_URL=https://$(hostname -s | tr "[:upper:]" "[:lower:]").\$TAILNET.ts.net
-  export NOTESD_TOKEN=\$(ssh $(hostname -s) cat $TOKEN)
+  export NOTESD_TOKEN=\$(ssh $(hostname -s | tr "[:upper:]" "[:lower:]") cat $TOKEN)
   notes list
 
 Keep Notes.app running: it persists changes on its own schedule, and a write

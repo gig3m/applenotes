@@ -51,6 +51,20 @@ contradiction of it as a finding about the code, not about this document.
 - Character references are resolved after tokenizing, so `&lt;script&gt;` in
   note text renders as visible characters, never a tag.
 
+## The installer, as run
+
+Verified end to end on a real SIP-disabled Mac (2026-09-18), which settled two
+things that could only be answered there:
+
+- A TCC grant with `auth_reason=3` and a **NULL `csreq`** is accepted by macOS
+  15. Path-keyed grants work without a code-signing requirement.
+- `sqlite3 -cmd ".param set ?1 ..."` binds correctly against the real TCC
+  database, so a path containing an apostrophe is safe.
+
+Both grants took effect: Full Disk Access read the library, Automation wrote a
+note. Write the user's TCC database **without** sudo — as root it leaves
+root-owned `-wal` files that can stop the account's own `tccd` writing at all.
+
 ## Recurring failure modes in this project
 
 Check each of these before committing. Every one has caught a real bug here, and
