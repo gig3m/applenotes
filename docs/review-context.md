@@ -114,6 +114,19 @@ converter from guesses -- most of these are not what you would predict.
 | `<blockquote>` | text survives, quote attribute lost | no |
 | `<input type=checkbox>` | stripped entirely, runs merge | no |
 
+Notes will not even take its own export back. Asked for the body of a note with
+monospaced paragraphs, Notes emits `<div><tt>…</tt></div>`; writing that exact
+HTML back stores Courier on body text, not the Monospaced paragraph style. Its
+round trip through its own format is lossy, so this is not a gap in the
+converter.
+
+What does survive is the font. `<font face="Menlo">` comes back as
+`font=Menlo-Regular`, which reads as monospace, so the appearance round-trips
+even though the style does not -- and a line that is monospaced end to end is
+treated the same whichever way it got there, or a note flips between a block and
+inline backticks on its first save. Verified stable across two passes through
+Notes.
+
 So the paragraph styles Notes will not accept from HTML at all are
 **checklist**, **monospaced**, **block quote**, and **subheading** -- those are
 genuine round-trip losses, not conversion bugs. Everything above them in the

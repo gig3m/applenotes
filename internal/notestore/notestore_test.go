@@ -295,16 +295,40 @@ func TestFenceIsSizedToContent(t *testing.T) {
 
 // An inline code span is literal: its content must not be backslash-escaped,
 // and the delimiter grows to clear any backticks inside.
+//
+// The monospaced run is part of a line here, not all of it. A line that is
+// monospaced end to end is a block instead -- see
+// TestAFullyMonospacedLineIsABlock -- so testing this with a whole line would
+// be testing the other thing.
 func TestInlineCodeSpanIsNotEscaped(t *testing.T) {
 	// Padding is only required when the content itself starts or ends with a
 	// backtick; "a`b" does not, so no spaces are added.
-	got := decode(t, blob("a`b", runFont(3, "Menlo-Regular"))).Markdown()
-	if want := "``a`b``"; got != want {
+	got := decode(t, blob("x a`b", run(2, 0, StyleBody, ""), runFont(3, "Menlo-Regular"))).Markdown()
+	if want := "x ``a`b``"; got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
-	padded := decode(t, blob("`x", runFont(2, "Menlo-Regular"))).Markdown()
-	if want := "`` `x ``"; padded != want {
+	padded := decode(t, blob("x `x", run(2, 0, StyleBody, ""), runFont(2, "Menlo-Regular"))).Markdown()
+	if want := "x `` `x ``"; padded != want {
 		t.Errorf("got %q want %q", padded, want)
+	}
+}
+
+// A line that is monospaced from end to end is a block, however it got that
+// way -- by Notes' Monospaced paragraph style, or by every run on it carrying a
+// monospace font.
+//
+// The two must agree, because a rewrite turns the first into the second: Notes
+// will not accept its Monospaced style back through HTML, and the font is what
+// survives. Rendering them differently made a note flip from a block to inline
+// backticks on its first save.
+func TestAFullyMonospacedLineIsABlock(t *testing.T) {
+	byStyle := decode(t, blob("names", run(5, 0, StyleMonospace, ""))).Markdown()
+	byFont := decode(t, blob("names", runFont(5, "Menlo-Regular"))).Markdown()
+	if byStyle != byFont {
+		t.Errorf("the two forms disagree:\n  style: %q\n  font:  %q", byStyle, byFont)
+	}
+	if !strings.HasPrefix(byFont, "```") {
+		t.Errorf("a fully monospaced line is not a block: %q", byFont)
 	}
 }
 
@@ -536,7 +560,6 @@ func TestDegradesDetectsFormattingLoss(t *testing.T) {
 		want string
 	}{
 		{"subheading", [][]byte{run(4, 0, StyleSubhead, "")}, "subheadings"},
-		{"monospace", [][]byte{run(4, 0, StyleMonospace, "")}, "monospaced paragraphs"},
 		{"block quote", [][]byte{runQuote(4)}, "block quotes"},
 		// Indentation degrades only where it is really lost. A list keeps its
 		// nesting through a rewrite now; an ordinary paragraph does not,

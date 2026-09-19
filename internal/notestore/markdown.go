@@ -64,12 +64,13 @@ func (n *Note) Markdown() string {
 	for _, ln := range lines {
 		style := ln.style()
 		indent := ln.indent()
-		body := renderSpans(ln.spans, style == StyleMonospace)
+		mono := ln.monospaced()
+		body := renderSpans(ln.spans, mono)
 		blank := strings.Trim(body, " \t\r\n\v\f") == ""
 
 		// Monospaced paragraphs become a fenced block, and their contents are
 		// emitted verbatim -- escaping inside a fence would be visible.
-		if style == StyleMonospace {
+		if mono {
 			inMono = true
 			monoBuf = append(monoBuf, pendingBlanks...)
 			pendingBlanks = nil
@@ -206,6 +207,36 @@ func (l line) style() int {
 		}
 	}
 	return StyleBody
+}
+
+// monospaced reports a line that should render as a monospaced block.
+//
+// Two things reach here and have to be treated alike, or the note changes shape
+// every time it is saved. Notes has a Monospaced paragraph style, and it will
+// not accept that style back through HTML -- measured: even <tt>, which is what
+// Notes itself exports, comes back as Courier-on-body-text. What does survive
+// is the font, so a rewrite turns a monospaced paragraph into a line whose runs
+// all carry a monospace font.
+//
+// Reading only the paragraph style would render that line as inline code spans
+// instead of a block, so a note would flip from one form to the other on its
+// first save and stay there. Treating a fully monospaced line as a monospaced
+// paragraph makes the round trip stable: block in, block out.
+func (l line) monospaced() bool {
+	if l.style() == StyleMonospace {
+		return true
+	}
+	any := false
+	for _, s := range l.spans {
+		if strings.TrimSpace(s.text) == "" {
+			continue // a trailing newline says nothing about the line
+		}
+		if !s.mono {
+			return false
+		}
+		any = true
+	}
+	return any
 }
 
 // htmlHeading returns the Markdown prefix for a line Notes stored as enlarged
@@ -737,9 +768,10 @@ func (n *Note) Degrades() []string {
 		if ps.StyleType == StyleSubhead {
 			add("subheadings")
 		}
-		if ps.StyleType == StyleMonospace {
-			add("monospaced paragraphs")
-		}
+		// Not reported: the appearance survives. Notes will not take its
+		// Monospaced paragraph style back through HTML, but the monospace font
+		// does, so the text still reads as monospaced -- and a warning that
+		// fires when nothing visibly changes is the kind nobody reads.
 		if ps.BlockQuote != 0 {
 			add("block quotes")
 		}
