@@ -81,6 +81,8 @@ type Store struct {
 	// is not there fails the whole query -- so every note would become
 	// unreadable to gain a field that is only sometimes present.
 	sharing bool
+	// urls reports whether the schema has the link-preview column.
+	urls bool
 }
 
 // Open opens the database read-only. Notes runs in WAL mode, so this reads
@@ -132,6 +134,7 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{db: db}
 	s.sharing = s.hasColumns("ZICCLOUDSYNCINGOBJECT", "ZZONEOWNERNAME", "ZSERVERSHAREDATA")
+	s.urls = s.hasColumns("ZICCLOUDSYNCINGOBJECT", "ZURLSTRING")
 	return s, nil
 }
 
@@ -348,8 +351,14 @@ func (s *Store) labelAttachments(n *Note) {
 		args = append(args, id)
 		marks = append(marks, "?")
 	}
+	// ZURLSTRING is absent on schemas that predate link previews, so the
+	// column is only asked for when it is there.
+	urlCol := "''"
+	if s.urls {
+		urlCol = "COALESCE(ZURLSTRING, '')"
+	}
 	rows, err := s.db.Query(`
-		SELECT ZIDENTIFIER, COALESCE(ZALTTEXT, ''), COALESCE(ZTITLE, '')
+		SELECT ZIDENTIFIER, COALESCE(ZALTTEXT, ''), COALESCE(ZTITLE, ''), `+urlCol+`
 		FROM ZICCLOUDSYNCINGOBJECT
 		WHERE ZIDENTIFIER IN (`+strings.Join(marks, ",")+`)`, args...)
 	if err != nil {
@@ -357,10 +366,14 @@ func (s *Store) labelAttachments(n *Note) {
 	}
 	defer rows.Close()
 	labels := map[string]string{}
+	urls := map[string]string{}
 	for rows.Next() {
-		var id, alt, title string
-		if rows.Scan(&id, &alt, &title) != nil {
+		var id, alt, title, url string
+		if rows.Scan(&id, &alt, &title, &url) != nil {
 			continue
+		}
+		if url != "" {
+			urls[id] = url
 		}
 		// ZALTTEXT is what Notes draws; ZTITLE is the fallback a link preview
 		// carries.
@@ -374,6 +387,9 @@ func (s *Store) labelAttachments(n *Note) {
 		if a := n.Runs[i].Attachment; a != nil {
 			if l := labels[a.Identifier]; l != "" {
 				a.Label = l
+			}
+			if u := urls[a.Identifier]; u != "" {
+				a.URL = u
 			}
 		}
 	}

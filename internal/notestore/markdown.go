@@ -585,6 +585,12 @@ func renderAttachment(s span) string {
 	if strings.TrimSpace(body) != "" {
 		label = strings.TrimSpace(body)
 	}
+	// A link preview points somewhere real. Sending the reader to
+	// applenotes:attachment/<uuid> instead is a link that cannot be followed
+	// from anywhere except Notes, in place of one that works everywhere.
+	if s.attachment.URL != "" {
+		return "[" + escapeText(label) + "](" + escapeURL(s.attachment.URL) + ")"
+	}
 	if s.attachment.Identifier == "" {
 		return "[" + escapeText(label) + "]"
 	}
@@ -687,7 +693,7 @@ func escapeLineStart(s string) string {
 func escapeURL(u string) string {
 	needsWrap := strings.ContainsAny(u, "()")
 	var b strings.Builder
-	for _, r := range u {
+	for i, r := range u {
 		switch {
 		case r == '<':
 			b.WriteString("%3C")
@@ -698,7 +704,11 @@ func escapeURL(u string) string {
 			// it would be eaten -- or, in the wrapped form, would escape the
 			// closing bracket and break the link entirely.
 			b.WriteString("%5C")
-		case r == '&':
+		case r == '&' && looksLikeEntity(u[i:]):
+			// Only an & that could start a character reference. Encoding every
+			// one of them turned "?v=X&list=Y&index=2" into a single query
+			// parameter whose value contained the rest of the URL -- every
+			// YouTube link in the library was broken this way.
 			b.WriteString("%26")
 		case unicode.IsSpace(r) || unicode.IsControl(r):
 			// Whitespace is illegal in a destination even inside <>, so it is

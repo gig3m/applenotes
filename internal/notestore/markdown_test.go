@@ -258,3 +258,51 @@ func TestAnUnlabelledAttachmentStillSaysWhatItIs(t *testing.T) {
 		t.Errorf("lost the type: %q", got)
 	}
 }
+
+// A link preview points somewhere real. Sending the reader to
+// applenotes:attachment/<uuid> is a link that cannot be followed from anywhere
+// except Notes, in place of one that works everywhere -- and the address is
+// right there on the attachment row.
+func TestALinkPreviewLinksToWhereItPoints(t *testing.T) {
+	n := decode(t, blob("￼", runAttach(1, "ATT-1", "public.url")))
+	n.Runs[0].Attachment.Label = "Short Game Chef"
+	n.Runs[0].Attachment.URL = "https://www.youtube.com/watch?v=FF4qMwZrj2U&index=2"
+	got := n.Markdown()
+	if !strings.Contains(got, "youtube.com/watch") {
+		t.Errorf("the destination was dropped: %q", got)
+	}
+	if strings.Contains(got, "applenotes:attachment") {
+		t.Errorf("still pointing at the attachment: %q", got)
+	}
+	if !strings.Contains(got, "Short Game Chef") {
+		t.Errorf("lost the label: %q", got)
+	}
+}
+
+// An attachment that points nowhere -- an image, a table -- still refers to
+// itself, which is the most that can be said about it.
+func TestAnAttachmentWithNoURLStillReferencesItself(t *testing.T) {
+	n := decode(t, blob("￼", runAttach(1, "ATT-1", "public.png")))
+	if got := n.Markdown(); !strings.Contains(got, "applenotes:attachment/ATT-1") {
+		t.Errorf("lost the reference: %q", got)
+	}
+}
+
+// A query string is mostly ampersands, and every one of them used to be
+// percent-encoded. "?v=X&list=Y&index=2" became a single parameter whose value
+// contained the rest of the URL, so every YouTube link in a real library was
+// broken. The HTML side escapes the href on its own, so there was never
+// anything for this to protect against -- except an & that really could start
+// a character reference, which is still encoded.
+func TestQueryStringsSurvive(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"https://x.test/watch?v=A&list=B&index=2", "https://x.test/watch?v=A&list=B&index=2"},
+		{"https://x.test/a?b=1&c=2", "https://x.test/a?b=1&c=2"},
+		// Ambiguous: this one really could be read as a character reference.
+		{"https://x.test/?a=&amp;", "https://x.test/?a=%26amp;"},
+	} {
+		if got := escapeURL(tc.url); got != tc.want {
+			t.Errorf("escapeURL(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}

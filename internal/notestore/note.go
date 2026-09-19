@@ -66,6 +66,11 @@ type ParagraphStyle struct {
 }
 
 type AttachmentInfo struct {
+	// URL is where the attachment points, for the kinds that point somewhere:
+	// a link preview carries the address it previews. Filled by the store, for
+	// the same reason as Label.
+	URL string
+
 	// Label is the text Notes shows in place of the attachment -- a mention's
 	// "@Clay", for instance. It is not in the protobuf; the store fills it in
 	// from the database, because the alternative is printing a UTI at the
