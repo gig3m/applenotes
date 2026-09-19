@@ -229,3 +229,32 @@ func TestABlankAfterAMonospacedBlockStaysOutside(t *testing.T) {
 		}
 	}
 }
+
+// An attachment with text of its own must show that text.
+//
+// The protobuf carries only an identifier and a type, so a mention read as
+// "com.apple.notes.inlinetextattachment.mention" where every other client shows
+// "@Clay". The UTI is a fallback for attachments that have no text, not a
+// label.
+func TestAnAttachmentShowsItsOwnTextWhenItHasSome(t *testing.T) {
+	// U+FFFC is the object replacement character, which is what marks an
+	// attachment's slot in a real note's text.
+	n := decode(t, blob("\ufffc", runAttach(1, "ATT-1", "com.apple.notes.inlinetextattachment.mention")))
+	n.Runs[0].Attachment.Label = "@Clay"
+	got := n.Markdown()
+	if !strings.Contains(got, "@Clay") {
+		t.Errorf("the mention did not show its text: %q", got)
+	}
+	if strings.Contains(got, "inlinetextattachment") {
+		t.Errorf("the UTI is still being shown: %q", got)
+	}
+}
+
+// An attachment with no text of its own keeps the UTI, which at least says
+// what it is.
+func TestAnUnlabelledAttachmentStillSaysWhatItIs(t *testing.T) {
+	n := decode(t, blob("\ufffc", runAttach(1, "ATT-1", "public.png")))
+	if got := n.Markdown(); !strings.Contains(got, "public.png") {
+		t.Errorf("lost the type: %q", got)
+	}
+}

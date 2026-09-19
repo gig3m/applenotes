@@ -569,6 +569,13 @@ func renderAttachment(s span) string {
 	if s.attachment.TypeUTI != "" {
 		label = s.attachment.TypeUTI
 	}
+	// What Notes shows, when it is known. A mention read as
+	// "com.apple.notes.inlinetextattachment.mention" where every other client
+	// shows "@Clay" -- the UTI is a fallback for things that have no text of
+	// their own, not a label.
+	if s.attachment.Label != "" {
+		label = s.attachment.Label
+	}
 	body := strings.Map(func(r rune) rune {
 		if r == objectReplacement {
 			return -1

@@ -66,6 +66,12 @@ type ParagraphStyle struct {
 }
 
 type AttachmentInfo struct {
+	// Label is the text Notes shows in place of the attachment -- a mention's
+	// "@Clay", for instance. It is not in the protobuf; the store fills it in
+	// from the database, because the alternative is printing a UTI at the
+	// reader.
+	Label string
+
 	Identifier string
 	TypeUTI    string
 }

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -313,7 +314,69 @@ func (s *Store) Body(uuid string) (*Note, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Decode(blob)
+	n, err := Decode(blob)
+	if err != nil {
+		return nil, err
+	}
+	s.labelAttachments(n)
+	return n, nil
+}
+
+// labelAttachments fills in the text Notes shows for each attachment.
+//
+// The protobuf carries only an identifier and a type, so an attachment with
+// text of its own -- a mention, a link preview -- read as a bare UTI. The text
+// is in the database beside the attachment row, so this is one query per note
+// rather than anything clever.
+//
+// Best effort: an attachment whose row is missing keeps its UTI, which is what
+// it had before. Failing the whole read because a label is unavailable would
+// trade a cosmetic problem for an unreadable note.
+func (s *Store) labelAttachments(n *Note) {
+	ids := map[string]bool{}
+	for i := range n.Runs {
+		if a := n.Runs[i].Attachment; a != nil && a.Identifier != "" {
+			ids[a.Identifier] = true
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	args := make([]any, 0, len(ids))
+	marks := make([]string, 0, len(ids))
+	for id := range ids {
+		args = append(args, id)
+		marks = append(marks, "?")
+	}
+	rows, err := s.db.Query(`
+		SELECT ZIDENTIFIER, COALESCE(ZALTTEXT, ''), COALESCE(ZTITLE, '')
+		FROM ZICCLOUDSYNCINGOBJECT
+		WHERE ZIDENTIFIER IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	labels := map[string]string{}
+	for rows.Next() {
+		var id, alt, title string
+		if rows.Scan(&id, &alt, &title) != nil {
+			continue
+		}
+		// ZALTTEXT is what Notes draws; ZTITLE is the fallback a link preview
+		// carries.
+		if alt != "" {
+			labels[id] = alt
+		} else if title != "" {
+			labels[id] = title
+		}
+	}
+	for i := range n.Runs {
+		if a := n.Runs[i].Attachment; a != nil {
+			if l := labels[a.Identifier]; l != "" {
+				a.Label = l
+			}
+		}
+	}
 }
 
 func scanNotes(rows *sql.Rows) ([]NoteMeta, error) {
