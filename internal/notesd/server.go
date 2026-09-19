@@ -270,6 +270,13 @@ func (s *Server) getNote(w http.ResponseWriter, r *http.Request) {
 	body, bodyErr := s.store.Body(uuid)
 	if bodyErr == nil {
 		out.Markdown = body.Markdown()
+		// A table is an attachment whose contents are not in the note's own
+		// protobuf. Notes will hand it over as HTML, so it is asked -- but only
+		// for a note that has one.
+		if id, err := s.store.ScriptID(uuid); err == nil {
+			out.Markdown = notesapp.FillTables(
+				r.Context(), applescript.RunnerFunc(applescript.Run), id, out.Markdown)
+		}
 		// Reported so a client can warn before round-tripping the note.
 		out.Degrades = body.Degrades()
 		out.Destroys = body.Destroys()

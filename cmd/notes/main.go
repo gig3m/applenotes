@@ -17,6 +17,7 @@ import (
 	"text/tabwriter"
 	"unicode/utf16"
 
+	"github.com/gig3m/applenotes/internal/applescript"
 	"github.com/gig3m/applenotes/internal/notesapp"
 	"github.com/gig3m/applenotes/internal/notestore"
 )
@@ -336,7 +337,14 @@ func show(stdout io.Writer, path, uuid string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, body.Markdown())
+	md := body.Markdown()
+	// A table's contents are not in the note's protobuf; Notes hands them over
+	// as HTML when asked, and is only asked for a note that has one.
+	if id, idErr := s.ScriptID(uuid); idErr == nil {
+		md = notesapp.FillTables(
+			context.Background(), applescript.RunnerFunc(applescript.Run), id, md)
+	}
+	fmt.Fprintln(stdout, md)
 	return nil
 }
 

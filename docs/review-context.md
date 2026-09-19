@@ -155,3 +155,22 @@ Two traps met while measuring:
   `immutable=1` is for reading a pre-write snapshot on purpose, nothing else.
 - Notes buffers for well over a minute. A note created by Apple Events is
   visible to AppleScript immediately and absent from the database long after.
+
+## Tables
+
+A table is an attachment whose contents live in `ZMERGEABLEDATA1` on the
+attachment row -- a gzipped protobuf holding a CRDT, not the note's own body
+format. Rows, columns and cells are three separate structures: two `CRTree`s
+giving display order, and an ordered set mapping column -> row -> cell. The cell
+text comes out readily, and both orderings decode, but the cell map keys rows by
+a different object identity than the ordering tree does, and nothing in a single
+table links the two.
+
+None of that is needed. Asked for a note's body, Notes returns the table as
+ordinary HTML, already in display order. That is where tables come from, at the
+cost of one Apple Event for a note that has one -- two notes in a library of
+fifty, so nothing is paid for the rest.
+
+The usual caveat applies inside the table only: AppleScript drops hyperlink
+hrefs, so a link in a cell loses its destination. The alternative was having no
+table at all.
