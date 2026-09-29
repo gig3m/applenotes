@@ -9,6 +9,10 @@ iPhone — with formatting and hyperlinks intact.
 **This requires disabling System Integrity Protection on the bridge Mac.** That
 is a deliberate trade, the same one BlueBubbles asks for. See [Security](#security).
 
+![The notes command on Linux: listing notes from the Mac, and printing one as Markdown](docs/screenshot.png)
+
+Prefer a window? [anotes](https://github.com/gig3m/anotes) is a desktop app on top of the same daemon.
+
 ## Why this exists
 
 Apple ships no Notes API. Unlike Reminders and Calendar, which have EventKit,
